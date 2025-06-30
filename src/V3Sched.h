@@ -153,17 +153,60 @@ public:
 };
 
 class VirtIfaceTriggers final {
+    // 新增：表示virtual interface的特定成员
+    struct IfaceMember {
+        const AstIface* m_ifacep;      // Interface类型
+        const std::string m_memberName; // 成员字段名
+        
+        IfaceMember(const AstIface* ifacep, const std::string& memberName)
+            : m_ifacep(ifacep), m_memberName(memberName) {}
+            
+        bool operator<(const IfaceMember& other) const {
+            if (m_ifacep != other.m_ifacep) return m_ifacep < other.m_ifacep;
+            return m_memberName < other.m_memberName;
+        }
+    };
+    
+    // 新增：成员级别的触发器类型定义
+    using IfaceMemberTrigger = std::pair<IfaceMember, AstVarScope*>;
+    using IfaceMemberTriggerVec = std::vector<IfaceMemberTrigger>;
+    using IfaceMemberSensMap = std::map<IfaceMember, AstSenTree*>;
+    
+    // 保留：接口级别触发器类型（向后兼容）
     using IfaceTrigger = std::pair<const AstIface*, AstVarScope*>;
     using IfaceTriggerVec = std::vector<IfaceTrigger>;
     using IfaceSensMap = std::map<const AstIface*, AstSenTree*>;
-    IfaceTriggerVec m_triggers;
+    
+    IfaceMemberTriggerVec m_memberTriggers;  // 成员级别触发器
+    IfaceTriggerVec m_ifaceTriggers;         // 接口级别触发器（兼容性）
 
 public:
-    void emplace_back(IfaceTrigger&& p) { m_triggers.emplace_back(std::move(p)); }
-    IfaceTriggerVec::const_iterator begin() const { return m_triggers.begin(); }
-    IfaceTriggerVec::const_iterator end() const { return m_triggers.end(); }
+    // 新增：成员级别触发器管理方法
+    void addMemberTrigger(const AstIface* ifacep, const std::string& memberName, AstVarScope* triggerVscp) {
+        m_memberTriggers.emplace_back(IfaceMember(ifacep, memberName), triggerVscp);
+    }
+    
+    AstVarScope* findMemberTrigger(const AstIface* ifacep, const std::string& memberName) const {
+        IfaceMember target(ifacep, memberName);
+        for (const auto& pair : m_memberTriggers) {
+            if (!(pair.first < target) && !(target < pair.first)) {
+                return pair.second;
+            }
+        }
+        return nullptr;
+    }
+    
+    // 新增：成员触发器敏感度树创建
+    IfaceMemberSensMap makeMemberToSensMap(AstNetlist* netlistp, size_t vifTriggerIndex,
+                                          AstVarScope* trigVscp) const;
+    
+    // 保留：原有接口级别方法（向后兼容）
+    void emplace_back(IfaceTrigger&& p) { m_ifaceTriggers.emplace_back(std::move(p)); }
+    IfaceTriggerVec::const_iterator begin() const { return m_ifaceTriggers.begin(); }
+    IfaceTriggerVec::const_iterator end() const { return m_ifaceTriggers.end(); }
     IfaceSensMap makeIfaceToSensMap(AstNetlist* netlistp, size_t vifTriggerIndex,
                                     AstVarScope* trigVscp) const;
+    
     VL_UNCOPYABLE(VirtIfaceTriggers);
     VirtIfaceTriggers() = default;
     VirtIfaceTriggers(VirtIfaceTriggers&&) = default;
