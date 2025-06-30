@@ -75,9 +75,10 @@ private:
             }
         });
     }
-    
     // For each write across a virtual interface boundary (member-level tracking)
-    static void foreachWrittenVirtIfaceMember(AstNode* const nodep, const OnWriteToVirtIfaceMember& onWrite) {
+    static void foreachWrittenVirtIfaceMember(
+        AstNode* const nodep,
+        const std::function<void(AstVarRef*, AstIface*, const std::string&)>& onWrite) {
         nodep->foreach([&](AstVarRef* const refp) {
             if (refp->access().isReadOnly()) return;
             if (AstIfaceRefDType* const dtypep = VN_CAST(refp->varp()->dtypep(), IfaceRefDType)) {
@@ -124,8 +125,8 @@ private:
         }
         return new AstVarRef{flp, VN_AS(ifacep->user1p(), VarScope), VAccess::WRITE};
     }
-    
-    // Create trigger var for the given interface member; return a write ref to it
+
+    // Create trigger reference for a specific interface member
     AstVarRef* createVirtIfaceMemberTriggerRefp(FileLine* const flp, AstIface* ifacep, 
                                                const std::string& memberName) {
         // Check if we already have a trigger for this specific member
@@ -239,8 +240,7 @@ private:
             m_trigAssignMemberName.clear();
         }
         FileLine* const flp = nodep->fileline();
-        
-        // 新增：使用成员级别跟踪实现更细粒度触发器
+
         foreachWrittenVirtIfaceMember(nodep, [&](AstVarRef*, AstIface* ifacep, const std::string& memberName) {
             if (ifacep != m_trigAssignIfacep || memberName != m_trigAssignMemberName) {
                 // Write to different interface member than before - need new trigger assignment
@@ -254,8 +254,7 @@ private:
                 nodep->addNextHere(m_trigAssignp);
             }
         });
-        
-        // 保留：接口级别跟踪作为后备（向后兼容）
+        // Fallback to whole-interface tracking if no member-specific assignments found
         if (!m_trigAssignp) {
             foreachWrittenVirtIface(nodep, [&](AstVarRef*, AstIface* ifacep) {
                 if (ifacep != m_trigAssignIfacep) {
