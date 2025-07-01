@@ -127,7 +127,7 @@ private:
     }
 
     // Create trigger reference for a specific interface member
-    AstVarRef* createVirtIfaceMemberTriggerRefp(FileLine* const flp, AstIface* ifacep, 
+    AstVarRef* createVirtIfaceMemberTriggerRefp(FileLine* const flp, AstIface* ifacep,
                                                const std::string& memberName) {
         // Check if we already have a trigger for this specific member
         AstVarScope* existingTrigger = m_triggers.findMemberTrigger(ifacep, memberName);

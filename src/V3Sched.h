@@ -155,8 +155,8 @@ public:
 class VirtIfaceTriggers final {
     // Represents a specific member in a virtual interface
     struct IfaceMember {
-        const AstIface* m_ifacep;             //!< Pointer to the interface type
-        const std::string m_memberName;       //!< Name of the member field
+        const AstIface* m_ifacep;             // Interface type
+        const std::string m_memberName;       // Name of the member field
 
         IfaceMember(const AstIface* ifacep, const std::string& memberName)
             : m_ifacep(ifacep), m_memberName(memberName) {}
