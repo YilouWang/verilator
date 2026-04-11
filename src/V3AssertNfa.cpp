@@ -58,7 +58,8 @@ struct SvaNfaNode final {
     // acceptable tradeoff per spec 3.2.1, since the alternative (one register
     // per cycle) explodes for large N-M.
     bool isCounter = false;
-    int counterRange = 0;  // N-M for the window
+    int counterMin = 0;  // Start of [min,max] match window
+    int counterMax = 0;  // Inclusive end of window; reject fires here
     // Liveness terminal: reached via an unbounded wait (`##[M:$]`, `[*]`,
     // etc.). Attempts ending here never fail in finite simulation time, so
     // reject must NOT fire from this source (IEEE weak semantics). Only
@@ -71,6 +72,13 @@ struct SvaNfaEdge final {
     int toId;
     AstNodeExpr* condp = nullptr;  // nullptr = unconditional; OWNED by NFA
     bool consumesCycle;  // true = Edge (##1), false = Link (##0/boolean)
+    // rejectOnFail: if the source state is active and condp is false,
+    // contribute to the reject signal. Used for "required first step"
+    // boolean checks where failure at that cycle terminates the attempt
+    // immediately (not a window retry). Set only on the outermost
+    // required-step Link of a sequence build; nested / merged / optional
+    // Links must NOT set this.
+    bool rejectOnFail = false;
 };
 
 struct SvaNfa final {
@@ -126,10 +134,17 @@ struct SvaNfa final {
 // at the terminal node. It goes on the accept Link, not as a separate node.
 
 struct BuildResult final {
-    int termNode;           // The last NFA node of the built sub-graph
+    int termNode;  // Primary terminal node; accept Link here contributes to
+                   // BOTH accept and reject in Phase 3 (non-liveness sources).
     AstNodeExpr* finalCondp;  // Final condition for accept/reject (nullptr = unconditional)
+    // Additional mid-window source nodes for range delays with a pure
+    // boolean RHS. Each of these gets its own Link to accept, marked
+    // isUnbounded so Phase 3 treats them as accept-only (they represent
+    // intermediate cycles of the [M,N] window where a match is still
+    // possible later if this cycle fails).
+    std::vector<int> midSources;
     bool valid() const { return termNode >= 0; }
-    static BuildResult fail() { return {-1, nullptr}; }
+    static BuildResult fail() { return {-1, nullptr, {}}; }
 };
 
 //######################################################################
@@ -138,6 +153,13 @@ struct BuildResult final {
 class SvaNfaBuilder final {
     SvaNfa& m_nfa;
     std::vector<AstNodeExpr*> m_throughoutStack;
+    // Once an unbounded wait (`##[M:$]`, `[*]`, `[->N]`, `[+]`) has been
+    // built, every subsequently created node inherits liveness: attempts
+    // reaching them never fail in finite simulation time. Sticky across
+    // the rest of the sequence build -- required to suppress spurious
+    // reject on `a |-> ##[+] b ##1 X` style patterns where the inner
+    // terminal is still "reachable only via a liveness path".
+    bool m_inUnboundedScope = false;
 
     AstNodeExpr* throughoutCond(AstNodeExpr* baseCond, FileLine* flp) {
         if (m_throughoutStack.empty()) return baseCond;
@@ -187,6 +209,7 @@ class SvaNfaBuilder final {
         for (AstNodeExpr* const cp : m_throughoutStack) {
             node.throughoutConds.push_back(cp->cloneTreePure(false));
         }
+        if (m_inUnboundedScope) node.isUnbounded = true;
         return id;
     }
 
@@ -220,7 +243,12 @@ class SvaNfaBuilder final {
 
     // Build NFA for an SExpr. Returns {termNode, finalCond}.
     // The finalCond is the RHS expression -- NOT yet added as a node.
-    BuildResult buildSExpr(AstSExpr* sexprp, int entryNode) {
+    // isTopLevelStep: when true, the outermost required boolean check
+    // (the preExpr Link) is marked as rejectOnFail so that "trigger
+    // fires, first boolean fails" fires a reject even though the attempt
+    // never leaves the start state.
+    BuildResult buildSExpr(AstSExpr* sexprp, int entryNode,
+                           bool isTopLevelStep = false) {
         AstDelay* const delayp = VN_CAST(sexprp->delayp(), Delay);
         if (!delayp || !delayp->isCycleDelay()) return BuildResult::fail();
 
@@ -236,6 +264,17 @@ class SvaNfaBuilder final {
                 const int condNode = scopedCreateNode();
                 guardedLink(pre.termNode, condNode,
                             sampled(pre.finalCondp->cloneTreePure(false)), flp);
+                if (isTopLevelStep
+                    && !m_nfa.nodes[pre.termNode].isUnbounded
+                    && !m_inUnboundedScope) {
+                    // Mark Link as rejectOnFail: trigger fires AND this
+                    // required boolean is false -> immediate reject. Must
+                    // NOT mark when the source is already a liveness state
+                    // (e.g. `(##[+] b) ##1 X` parses as outer SExpr with
+                    // preExpr = nested unbounded SExpr; the "first boolean"
+                    // check is deferred to when the liveness wait ends).
+                    m_nfa.edges.back().rejectOnFail = true;
+                }
                 currentNode = condNode;
             } else {
                 currentNode = pre.termNode;
@@ -243,39 +282,90 @@ class SvaNfaBuilder final {
         }
 
         // Handle delay
+        std::vector<int> rangeMidSources;
         if (delayp->isRangeDelay()) {
             const int minDelay = getConstInt(delayp->lhsp());
             if (minDelay < 0) return BuildResult::fail();
-            currentNode = addDelayChain(currentNode, minDelay, flp);
 
             if (delayp->isUnbounded()) {
+                // `##[M:$]`: wait M cycles, then self-loop waiting for the
+                // match condition. Unbounded = liveness, so no reject.
+                currentNode = addDelayChain(currentNode, minDelay, flp);
                 guardedEdge(currentNode, currentNode, flp);
                 m_nfa.nodes[currentNode].isUnbounded = true;
+                m_inUnboundedScope = true;
             } else {
                 const int maxDelay = getConstInt(delayp->rhsp());
                 if (maxDelay < minDelay) return BuildResult::fail();
-                const int range = maxDelay - minDelay;
-                // Small ranges: register chain preserves overlapping. Large
-                // ranges would blow up Phase 1 (O(N^2) fixed point with N
-                // Links into mergeNode), so switch to a counter FSM (single
-                // attempt in flight -- spec 3.2.1).
-                constexpr int kChainLimit = 64;
-                if (range <= kChainLimit) {
-                    const int mergeNode = scopedCreateNode();
-                    guardedLink(currentNode, mergeNode, flp);
-                    for (int i = 0; i < range; ++i) {
-                        const int nextNode = scopedCreateNode();
-                        guardedEdge(currentNode, nextNode, flp);
-                        guardedLink(nextNode, mergeNode, flp);
-                        currentNode = nextNode;
-                    }
-                    currentNode = mergeNode;
+                if (minDelay == maxDelay) {
+                    currentNode = addDelayChain(currentNode, minDelay, flp);
                 } else {
-                    const int counterNodeId = scopedCreateNode();
-                    m_nfa.nodes[counterNodeId].isCounter = true;
-                    m_nfa.nodes[counterNodeId].counterRange = range;
-                    guardedEdge(currentNode, counterNodeId, flp);
-                    currentNode = counterNodeId;
+                    const int range = maxDelay - minDelay;
+                    currentNode = addDelayChain(currentNode, minDelay, flp);
+                    // Decide between register-chain and counter-FSM:
+                    // - Pure boolean RHS or nested SExpr RHS: register chain
+                    //   (preserves overlapping under set-based semantics by
+                    //   linking each mid-position as accept-only).
+                    // - Very large ranges (chain would blow up Phase 1's
+                    //   fixed point): fall back to counter FSM.
+                    constexpr int kChainLimit = 256;
+                    AstNodeExpr* const exprp = sexprp->exprp();
+                    const bool nestedRhs = VN_IS(exprp, SExpr);
+                    if (range > kChainLimit) {
+                        // Large range: counter FSM (single attempt).
+                        const int counterNodeId = scopedCreateNode();
+                        m_nfa.nodes[counterNodeId].isCounter = true;
+                        m_nfa.nodes[counterNodeId].counterMin = 0;
+                        m_nfa.nodes[counterNodeId].counterMax = range;
+                        guardedEdge(currentNode, counterNodeId, flp);
+                        currentNode = counterNodeId;
+                    } else if (nestedRhs) {
+                        // Nested: merge all positions into mergeNode; the
+                        // continuation sees "attempt active at some position
+                        // in [M,N]". Reject semantics of the nested terminal
+                        // are correct because it is a later, per-attempt
+                        // terminal (not the range merge).
+                        const int mergeNode = scopedCreateNode();
+                        guardedLink(currentNode, mergeNode, flp);
+                        for (int i = 0; i < range; ++i) {
+                            const int nextNode = scopedCreateNode();
+                            guardedEdge(currentNode, nextNode, flp);
+                            guardedLink(nextNode, mergeNode, flp);
+                            currentNode = nextNode;
+                        }
+                        currentNode = mergeNode;
+                    } else {
+                        // Pure boolean RHS: build chain without merge. Each
+                        // mid-position directly links to accept (marked
+                        // isUnbounded = accept-only). The LAST position is
+                        // the primary termNode (contributes to reject).
+                        //
+                        // Edge gating: every range-chain edge fires only
+                        // when sampled(exprp) is FALSE at this cycle. This
+                        // prevents attempts that have already matched from
+                        // propagating further down the chain, so w_N
+                        // represents "an attempt reached the LAST cycle
+                        // without having matched earlier". Without this
+                        // gating, an attempt that matched at position M
+                        // would still appear in w_(M+1), ..., w_N, and
+                        // reject would fire spuriously when the current
+                        // boolean is false while the attempt has already
+                        // been accepted.
+                        rangeMidSources.push_back(currentNode);  // P_M
+                        for (int i = 0; i < range; ++i) {
+                            const int nextNode = scopedCreateNode();
+                            AstNodeExpr* const notExprp = new AstNot{flp,
+                                sampled(exprp->cloneTreePure(false))};
+                            notExprp->dtypeSetBit();
+                            guardedEdge(currentNode, nextNode, notExprp, flp);
+                            if (i < range - 1) {
+                                rangeMidSources.push_back(nextNode);
+                            }
+                            currentNode = nextNode;
+                        }
+                        // currentNode = last position = P_N, the reject
+                        // source.
+                    }
                 }
             }
         } else {
@@ -287,11 +377,13 @@ class SvaNfaBuilder final {
         // Handle RHS -- return it as finalCond, NOT as a Link node
         AstNodeExpr* const exprp = sexprp->exprp();
         if (AstSExpr* const rhsSExprp = VN_CAST(exprp, SExpr)) {
-            // Nested SExpr: recurse (its finalCond becomes ours)
+            // Nested SExpr: recurse (its finalCond becomes ours).
+            // rangeMidSources should be empty here because we picked the
+            // mergeNode path for nested RHS.
             return buildSExpr(rhsSExprp, currentNode);
         }
-        // Simple boolean RHS: this is the final condition
-        return {currentNode, exprp};
+        // Simple boolean RHS: this is the final condition.
+        return {currentNode, exprp, std::move(rangeMidSources)};
     }
 
     BuildResult buildConsRep(AstConsRep* repp, int entryNode) {
@@ -336,6 +428,7 @@ class SvaNfaBuilder final {
             // Liveness terminal: the attempt can never explicitly fail in
             // bounded time.
             m_nfa.nodes[currentNode].isUnbounded = true;
+            m_inUnboundedScope = true;
         } else if (repp->maxCountp()) {
             const int maxN = getConstInt(repp->maxCountp());
             if (maxN < minN) return BuildResult::fail();
@@ -381,6 +474,7 @@ class SvaNfaBuilder final {
         }
         // `[->N]` waits unboundedly for each match -- liveness terminal.
         m_nfa.nodes[currentNode].isUnbounded = true;
+        m_inUnboundedScope = true;
         return {currentNode, nullptr};
     }
 
@@ -412,9 +506,13 @@ public:
         : m_nfa{nfa} {}
 
     // Build NFA for any expression node. Returns {termNode, finalCond}.
-    BuildResult buildExpr(AstNodeExpr* nodep, int entryNode) {
+    // isTopLevelStep: see buildSExpr -- only the outermost call from
+    // processAssertion / build() should pass true. Recursive calls into
+    // nested SExprs, merges, etc. must pass false (default).
+    BuildResult buildExpr(AstNodeExpr* nodep, int entryNode,
+                          bool isTopLevelStep = false) {
         if (AstSExpr* const sexprp = VN_CAST(nodep, SExpr)) {
-            return buildSExpr(sexprp, entryNode);
+            return buildSExpr(sexprp, entryNode, isTopLevelStep);
         }
         if (AstConsRep* const repp = VN_CAST(nodep, ConsRep)) {
             return buildConsRep(repp, entryNode);
@@ -485,7 +583,7 @@ public:
     // Build complete NFA for a standalone sequence.
     BuildResult build(AstNodeExpr* exprp) {
         m_nfa.startNode = scopedCreateNode();
-        return buildExpr(exprp, m_nfa.startNode);
+        return buildExpr(exprp, m_nfa.startNode, /*isTopLevelStep=*/true);
     }
 };
 
@@ -574,10 +672,26 @@ public:
             if (stateVars[i]) {
                 stateSig[i] = new AstVarRef{flp, stateVars[i], VAccess::READ};
             } else if (counterActiveVars[i]) {
-                // Counter FSM: state is "active && in-window". Since counter
-                // never exceeds counterRange while active, active_reg alone
-                // identifies being in the [0, counterRange] window.
-                stateSig[i] = new AstVarRef{flp, counterActiveVars[i], VAccess::READ};
+                // Counter FSM: state is "active && counter >= counterMin".
+                // An in-window cycle means the match condition may satisfy
+                // the sequence. counter < counterMin means we are waiting
+                // for the window to open (still active, but not yet
+                // acceptable).
+                AstVarRef* const activeRefp
+                    = new AstVarRef{flp, counterActiveVars[i], VAccess::READ};
+                if (nfa.nodes[i].counterMin == 0) {
+                    stateSig[i] = activeRefp;
+                } else {
+                    AstGte* const gtep = new AstGte{flp,
+                        new AstVarRef{flp, counterCountVars[i], VAccess::READ},
+                        new AstConst{flp, AstConst::WidthedValue{}, 32,
+                                     static_cast<uint32_t>(nfa.nodes[i].counterMin)}};
+                    gtep->dtypeSetBit();
+                    AstNodeExpr* const andp
+                        = new AstAnd{flp, activeRefp, gtep};
+                    andp->dtypeSetBit();
+                    stateSig[i] = andp;
+                }
             }
         }
 
@@ -661,8 +775,8 @@ public:
             if (!counterActiveVars[ci]) continue;
             AstVar* const activep = counterActiveVars[ci];
             AstVar* const cntp = counterCountVars[ci];
-            const uint32_t range
-                = static_cast<uint32_t>(nfa.nodes[ci].counterRange);
+            const uint32_t counterMax
+                = static_cast<uint32_t>(nfa.nodes[ci].counterMax);
 
             // incoming = OR of edge-driven contributions from upstream states
             AstNodeExpr* incomingp = nullptr;
@@ -684,27 +798,37 @@ public:
             }
             if (!incomingp) incomingp = new AstConst{flp, AstConst::BitFalse{}};
 
-            // accepted_now = active && $sampled(acceptCondp)
-            // If acceptCondp is nullptr, treat as always-match once in window.
+            // in_window = counter >= counterMin (active is implicit inside
+            // the outer "if (active)" branch).
+            AstNodeExpr* inWindowp = nullptr;
+            if (nfa.nodes[ci].counterMin == 0) {
+                inWindowp = new AstConst{flp, AstConst::BitTrue{}};
+            } else {
+                inWindowp = new AstGte{flp,
+                    new AstVarRef{flp, cntp, VAccess::READ},
+                    new AstConst{flp, AstConst::WidthedValue{}, 32,
+                                 static_cast<uint32_t>(nfa.nodes[ci].counterMin)}};
+                inWindowp->dtypeSetBit();
+            }
+            // accepted_now = in_window && $sampled(acceptCondp)
             AstNodeExpr* acceptedNowp = nullptr;
             if (acceptCondp) {
                 AstSampled* const sampp
                     = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
                 sampp->dtypeSetBit();
-                acceptedNowp = new AstAnd{flp,
-                    new AstVarRef{flp, activep, VAccess::READ}, sampp};
+                acceptedNowp = new AstAnd{flp, inWindowp, sampp};
                 acceptedNowp->dtypeSetBit();
             } else {
-                acceptedNowp = new AstVarRef{flp, activep, VAccess::READ};
+                acceptedNowp = inWindowp;
             }
 
-            // counter_at_end = counter == range
+            // counter_at_end = counter == counterMax
             AstNodeExpr* const counterAtEndp = new AstEq{flp,
                 new AstVarRef{flp, cntp, VAccess::READ},
-                new AstConst{flp, AstConst::WidthedValue{}, 32, range}};
+                new AstConst{flp, AstConst::WidthedValue{}, 32, counterMax}};
             counterAtEndp->dtypeSetBit();
 
-            // done = accepted_now || counter == range
+            // done = accepted_now || counter == counterMax
             AstNodeExpr* const donep = new AstOr{flp, acceptedNowp, counterAtEndp};
             donep->dtypeSetBit();
 
@@ -771,7 +895,7 @@ public:
                 AstNodeExpr* const atEndp = new AstEq{flp,
                     new AstVarRef{flp, counterCountVars[ci], VAccess::READ},
                     new AstConst{flp, AstConst::WidthedValue{}, 32,
-                                 static_cast<uint32_t>(nfa.nodes[ci].counterRange)}};
+                                 static_cast<uint32_t>(nfa.nodes[ci].counterMax)}};
                 atEndp->dtypeSetBit();
                 AstNodeExpr* const expireContribp
                     = new AstAnd{flp, srcSig, atEndp};
@@ -802,6 +926,30 @@ public:
         }
         if (!terminalActivep) {
             terminalActivep = new AstConst{flp, AstConst::BitFalse{}};
+        }
+
+        // Phase 3a: "required-step" rejection.
+        // For every Link marked rejectOnFail, reject fires when the source
+        // state is active but the link condition is false. This catches
+        // failures like `a |-> b ##...` where the antecedent fires but the
+        // consequent's first boolean (b) is false -- the attempt never
+        // leaves the start state, so no later terminal-based reject can
+        // ever fire for it.
+        AstNodeExpr* requiredStepRejectp = nullptr;
+        for (const auto& edge : nfa.edges) {
+            if (!edge.rejectOnFail) continue;
+            if (edge.consumesCycle) continue;
+            if (!stateSig[edge.fromId]) continue;
+            if (!edge.condp) continue;
+            AstNodeExpr* const srcSig
+                = stateSig[edge.fromId]->cloneTreePure(false);
+            AstNodeExpr* const notCondp
+                = new AstNot{flp, edge.condp->cloneTreePure(false)};
+            notCondp->dtypeSetBit();
+            AstNodeExpr* const failp = new AstAnd{flp, srcSig, notCondp};
+            failp->dtypeSetBit();
+            requiredStepRejectp
+                = orExprs(flp, requiredStepRejectp, failp);
         }
 
         // Phase 3b: Throughout-drop rejection.
@@ -850,15 +998,24 @@ public:
                 stateSig[i] = nullptr;
             }
         }
-        // disable iff applied to throughout-drop reject: dropping the guard
-        // during disable is NOT a failure (the evaluation is abandoned per
-        // IEEE 16.12).
-        if (throughoutRejectp && disableExprp) {
-            AstNodeExpr* const notDisp
-                = new AstNot{flp, disableExprp->cloneTreePure(false)};
-            notDisp->dtypeSetBit();
-            throughoutRejectp = new AstAnd{flp, throughoutRejectp, notDisp};
-            throughoutRejectp->dtypeSetBit();
+        // disable iff applied to throughout-drop and required-step rejects:
+        // either kind of failure during disable is abandoned per IEEE 16.12.
+        if (disableExprp) {
+            if (throughoutRejectp) {
+                AstNodeExpr* const notDisp
+                    = new AstNot{flp, disableExprp->cloneTreePure(false)};
+                notDisp->dtypeSetBit();
+                throughoutRejectp = new AstAnd{flp, throughoutRejectp, notDisp};
+                throughoutRejectp->dtypeSetBit();
+            }
+            if (requiredStepRejectp) {
+                AstNodeExpr* const notDisp
+                    = new AstNot{flp, disableExprp->cloneTreePure(false)};
+                notDisp->dtypeSetBit();
+                requiredStepRejectp
+                    = new AstAnd{flp, requiredStepRejectp, notDisp};
+                requiredStepRejectp->dtypeSetBit();
+            }
         }
 
         // Clean up disableExprp if passed (was cloned in Phase 2, original not attached)
@@ -868,11 +1025,11 @@ public:
         }
 
         if (isCover) {
-            // Cover property uses accept signal, not !reject.
-            // Throughout-drop doesn't affect cover (cover is about "did it
-            // match", not "did it fail"). rejectBasep is also unused by cover.
+            // Cover property uses accept signal, not !reject. Reject-style
+            // contributions are unused.
             if (throughoutRejectp) throughoutRejectp->deleteTree();
             if (rejectBasep) rejectBasep->deleteTree();
+            if (requiredStepRejectp) requiredStepRejectp->deleteTree();
             if (acceptCondp) {
                 AstNodeExpr* const sampledCondp
                     = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
@@ -906,6 +1063,11 @@ public:
         // OR in throughout-drop reject
         if (throughoutRejectp) {
             rejectp = orExprs(flp, rejectp, throughoutRejectp);
+            if (rejectp) rejectp->dtypeSetBit();
+        }
+        // OR in required-step reject
+        if (requiredStepRejectp) {
+            rejectp = orExprs(flp, rejectp, requiredStepRejectp);
             if (rejectp) rejectp->dtypeSetBit();
         }
 
@@ -1002,14 +1164,16 @@ class AssertNfaVisitor final : public VNVisitor {
                 // Sampled antecedent
                 nfa.addLink(nfa.startNode, trigNode,
                             new AstSampled{flp, parts.triggerExprp->cloneTreePure(false)});
-                result = builder.buildExpr(parts.seqExprp, trigNode);
+                result = builder.buildExpr(parts.seqExprp, trigNode,
+                                           /*isTopLevelStep=*/true);
             } else {
                 const int trigNode = nfa.createNode();
                 nfa.addLink(nfa.startNode, trigNode,
                             new AstSampled{flp, parts.triggerExprp->cloneTreePure(false)});
                 const int delayNode = nfa.createNode();
                 nfa.addClockEdge(trigNode, delayNode);
-                result = builder.buildExpr(parts.seqExprp, delayNode);
+                result = builder.buildExpr(parts.seqExprp, delayNode,
+                                           /*isTopLevelStep=*/true);
             }
 
             if (result.valid()) {
@@ -1017,6 +1181,12 @@ class AssertNfaVisitor final : public VNVisitor {
                 // Accept Link is unconditional. The finalCond is passed
                 // separately to the emitter for accept/reject computation.
                 nfa.addLink(result.termNode, nfa.acceptNode);
+                // Range-delay mid-window positions: accept-only (Phase 3
+                // skips reject contribution because we mark isUnbounded).
+                for (int src : result.midSources) {
+                    nfa.addLink(src, nfa.acceptNode);
+                    nfa.nodes[src].isUnbounded = true;
+                }
             }
         } else {
             // Standalone sequence
@@ -1024,6 +1194,10 @@ class AssertNfaVisitor final : public VNVisitor {
             if (result.valid()) {
                 nfa.createAcceptNode();
                 nfa.addLink(result.termNode, nfa.acceptNode);
+                for (int src : result.midSources) {
+                    nfa.addLink(src, nfa.acceptNode);
+                    nfa.nodes[src].isUnbounded = true;
+                }
             }
         }
 
