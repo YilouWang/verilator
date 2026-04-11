@@ -216,6 +216,61 @@ class SvaNfaBuilder final {
         return val;
     }
 
+    // Static fixed-length analysis for an SVA sub-expression. Returns the
+    // number of clock ticks the expression consumes from entry to terminal,
+    // or -1 if the length is not statically determined (variable / unbounded
+    // / unsupported construct). Used by SIntersect lowering to verify the
+    // IEEE 1800-2023 16.9.6 equal-length precondition before reusing the
+    // SAnd combiner.
+    //
+    // Supported:
+    //  - Boolean leaf (default)              -> 0
+    //  - AstSExpr with fixed cycle delay     -> pre + N + body
+    //  - AstSExpr with range delay M==N      -> pre + N + body
+    //  - AstSThroughout                      -> length of rhsp (the seq)
+    // Unsupported (returns -1):
+    //  - Range delays with M != N            -> variable
+    //  - Unbounded waits ##[M:$]             -> infinite/variable
+    //  - ConsRep / SGotoRep / SAnd / SOr     -> defer (rare in intersect)
+    //  - SIntersect nested in SIntersect     -> defer
+    static int fixedLength(AstNodeExpr* nodep) {
+        if (!nodep) return 0;
+        if (AstSExpr* const sexprp = VN_CAST(nodep, SExpr)) {
+            AstDelay* const delayp = VN_CAST(sexprp->delayp(), Delay);
+            if (!delayp || !delayp->isCycleDelay()) return -1;
+            int delayCycles = -1;
+            if (delayp->isRangeDelay()) {
+                if (delayp->isUnbounded()) return -1;
+                const int minD = getConstInt(delayp->lhsp());
+                const int maxD = getConstInt(delayp->rhsp());
+                if (minD < 0 || maxD < 0 || minD != maxD) return -1;
+                delayCycles = minD;
+            } else {
+                delayCycles = getConstInt(delayp->lhsp());
+                if (delayCycles < 0) return -1;
+            }
+            int preLen = 0;
+            if (AstNodeExpr* const prep = sexprp->preExprp()) {
+                preLen = fixedLength(prep);
+                if (preLen < 0) return -1;
+            }
+            const int bodyLen = fixedLength(sexprp->exprp());
+            if (bodyLen < 0) return -1;
+            return preLen + delayCycles + bodyLen;
+        }
+        if (AstSThroughout* const throughp = VN_CAST(nodep, SThroughout)) {
+            return fixedLength(throughp->rhsp());
+        }
+        if (VN_IS(nodep, ConsRep) || VN_IS(nodep, SGotoRep)
+            || VN_IS(nodep, SAnd) || VN_IS(nodep, SOr)
+            || VN_IS(nodep, SIntersect)) {
+            // Conservatively variable -- can be tightened in a follow-up.
+            return -1;
+        }
+        // Plain boolean expression (no SVA constructs) -- 0 cycles.
+        return 0;
+    }
+
     // Wrap expression in AstSampled for correct IEEE concurrent assertion semantics
     static AstNodeExpr* sampled(AstNodeExpr* exprp) {
         // All conditions in NFA use $sampled values
@@ -510,6 +565,88 @@ class SvaNfaBuilder final {
         return {currentNode, nullptr};
     }
 
+    // Shared sub-routine for SAnd and (lowered) SIntersect: build two
+    // disjoint sub-NFAs from the same entry node and aggregate via a
+    // done-latch combiner. See spec 3.6 for the done-latch pattern.
+    BuildResult buildAndCombiner(AstNodeExpr* lhsExpr, AstNodeExpr* rhsExpr,
+                                 int entryNode, FileLine* /*flp*/) {
+        // Snapshot-restore m_inUnboundedScope around each sub-build so an
+        // LHS liveness wait does not spuriously mark RHS nodes as unbounded
+        // (and vice versa). The combiner inherits liveness only if at
+        // least one side's terminal is unbounded.
+        const bool savedScope = m_inUnboundedScope;
+        const BuildResult lhs = buildExpr(lhsExpr, entryNode);
+        const bool lhsScope = m_inUnboundedScope;
+        m_inUnboundedScope = savedScope;
+        const BuildResult rhs = buildExpr(rhsExpr, entryNode);
+        const bool rhsScope = m_inUnboundedScope;
+        m_inUnboundedScope = savedScope || lhsScope || rhsScope;
+        if (!lhs.valid() || !rhs.valid()) return BuildResult::fail();
+        // Range-delay mid-window sources in either sub-branch would need
+        // to be folded into the latch's "accept-now" signal, which the
+        // current combiner does not support. Defer (UNSUPPORTED).
+        if (!lhs.midSources.empty() || !rhs.midSources.empty()) {
+            return BuildResult::fail();
+        }
+        const int combNode = scopedCreateNode();
+        SvaNfaNode& cn = m_nfa.nodes[combNode];
+        cn.isAndCombiner = true;
+        cn.andLhsTermId = lhs.termNode;
+        cn.andRhsTermId = rhs.termNode;
+        if (lhs.finalCondp) {
+            cn.andLhsCondp = lhs.finalCondp->cloneTreePure(false);
+        }
+        if (rhs.finalCondp) {
+            cn.andRhsCondp = rhs.finalCondp->cloneTreePure(false);
+        }
+        // Liveness propagates: if either sub-sequence is liveness-only
+        // (unbounded wait), the whole AND is liveness-only too.
+        if (m_nfa.nodes[lhs.termNode].isUnbounded
+            || m_nfa.nodes[rhs.termNode].isUnbounded) {
+            cn.isUnbounded = true;
+        }
+        // Wire sub-sequence terminal-boolean rejects so each side can
+        // fail the whole AND independently when its required terminal
+        // expression drops. The combiner is accept-only, so without
+        // these explicit links the sub-sequence "reached terminal but
+        // boolean false" case would be silently swallowed. The Links
+        // target a dedicated reject sink so that Phase 1 propagation
+        // does not pollute the combiner's accept formula.
+        //
+        // Skip rejectOnFail wiring entirely when either sub-side is
+        // liveness-only -- a liveness sub-sequence is never required to
+        // terminate, so failing its boolean check is not a definitive
+        // SAnd failure.
+        if (!cn.isUnbounded) {
+            bool needSink = false;
+            if (lhs.finalCondp
+                && !m_nfa.nodes[lhs.termNode].isUnbounded) {
+                needSink = true;
+            }
+            if (rhs.finalCondp
+                && !m_nfa.nodes[rhs.termNode].isUnbounded) {
+                needSink = true;
+            }
+            if (needSink) {
+                const int sinkNode = m_nfa.createNode();
+                m_nfa.nodes[sinkNode].isRejectSink = true;
+                if (lhs.finalCondp
+                    && !m_nfa.nodes[lhs.termNode].isUnbounded) {
+                    m_nfa.addLink(lhs.termNode, sinkNode,
+                                  sampled(lhs.finalCondp->cloneTreePure(false)));
+                    m_nfa.edges.back().rejectOnFail = true;
+                }
+                if (rhs.finalCondp
+                    && !m_nfa.nodes[rhs.termNode].isUnbounded) {
+                    m_nfa.addLink(rhs.termNode, sinkNode,
+                                  sampled(rhs.finalCondp->cloneTreePure(false)));
+                    m_nfa.edges.back().rejectOnFail = true;
+                }
+            }
+        }
+        return {combNode, nullptr};
+    }
+
     BuildResult buildThroughout(AstSThroughout* nodep, int entryNode) {
         // The entryNode may have been created outside this throughout scope
         // (e.g. the antecedent trigNode for `a |-> (cond throughout seq)`).
@@ -551,10 +688,6 @@ public:
         }
         if (AstSGotoRep* const repp = VN_CAST(nodep, SGotoRep)) {
             return buildGotoRep(repp, entryNode);
-        }
-        if (VN_IS(nodep, SIntersect)) {
-            // Intersect requires product-state construction -- defer to V3AssertProp
-            return BuildResult::fail();
         }
         if (AstSThroughout* const throughoutp = VN_CAST(nodep, SThroughout)) {
             return buildThroughout(throughoutp, entryNode);
@@ -600,88 +733,22 @@ public:
             return {mergeNode, nullptr};
         }
         if (AstSAnd* const andp = VN_CAST(nodep, SAnd)) {
-            // Temporal sequence AND: per IEEE 1800-2023 16.9.5, both
-            // operands must match, with end time = max of the two. We build
-            // disjoint sub-NFAs for LHS and RHS (both sharing the entry node
-            // only -- downstream nodes are disjoint per spec 2.2.1 join-point
-            // invariant) and aggregate their accept signals in a combiner
-            // node that the emitter specialises into done-latch hardware.
-            //
-            // Snapshot-restore m_inUnboundedScope around each sub-build so
-            // an LHS liveness wait does not spuriously mark RHS nodes as
-            // unbounded (and vice versa). The combiner itself inherits
-            // liveness only if at least one side's terminal is unbounded.
-            const bool savedScope = m_inUnboundedScope;
-            const BuildResult lhs = buildExpr(andp->lhsp(), entryNode);
-            const bool lhsScope = m_inUnboundedScope;
-            m_inUnboundedScope = savedScope;
-            const BuildResult rhs = buildExpr(andp->rhsp(), entryNode);
-            const bool rhsScope = m_inUnboundedScope;
-            m_inUnboundedScope = savedScope || lhsScope || rhsScope;
-            if (!lhs.valid() || !rhs.valid()) return BuildResult::fail();
-            // Range-delay mid-window sources in either sub-branch would need
-            // to be folded into the latch's "accept-now" signal, which the
-            // current combiner does not support. Defer (UNSUPPORTED).
-            if (!lhs.midSources.empty() || !rhs.midSources.empty()) {
-                return BuildResult::fail();
-            }
-            const int combNode = scopedCreateNode();
-            SvaNfaNode& cn = m_nfa.nodes[combNode];
-            cn.isAndCombiner = true;
-            cn.andLhsTermId = lhs.termNode;
-            cn.andRhsTermId = rhs.termNode;
-            if (lhs.finalCondp) {
-                cn.andLhsCondp = lhs.finalCondp->cloneTreePure(false);
-            }
-            if (rhs.finalCondp) {
-                cn.andRhsCondp = rhs.finalCondp->cloneTreePure(false);
-            }
-            // Liveness propagates: if either sub-sequence is liveness-only
-            // (unbounded wait), the whole AND is liveness-only too.
-            if (m_nfa.nodes[lhs.termNode].isUnbounded
-                || m_nfa.nodes[rhs.termNode].isUnbounded) {
-                cn.isUnbounded = true;
-            }
-            // Wire sub-sequence terminal-boolean rejects so each side can
-            // fail the whole AND independently when its required terminal
-            // expression drops. The combiner is accept-only, so without
-            // these explicit links the sub-sequence "reached terminal but
-            // boolean false" case would be silently swallowed. The Links
-            // target a dedicated reject sink so that Phase 1 propagation
-            // does not pollute the combiner's accept formula.
-            //
-            // Skip rejectOnFail wiring entirely when either sub-side is
-            // liveness-only -- a liveness sub-sequence is never required to
-            // terminate, so failing its boolean check is not a definitive
-            // SAnd failure.
-            if (!cn.isUnbounded) {
-                bool needSink = false;
-                if (lhs.finalCondp
-                    && !m_nfa.nodes[lhs.termNode].isUnbounded) {
-                    needSink = true;
-                }
-                if (rhs.finalCondp
-                    && !m_nfa.nodes[rhs.termNode].isUnbounded) {
-                    needSink = true;
-                }
-                if (needSink) {
-                    const int sinkNode = m_nfa.createNode();
-                    m_nfa.nodes[sinkNode].isRejectSink = true;
-                    if (lhs.finalCondp
-                        && !m_nfa.nodes[lhs.termNode].isUnbounded) {
-                        m_nfa.addLink(lhs.termNode, sinkNode,
-                                      sampled(lhs.finalCondp->cloneTreePure(false)));
-                        m_nfa.edges.back().rejectOnFail = true;
-                    }
-                    if (rhs.finalCondp
-                        && !m_nfa.nodes[rhs.termNode].isUnbounded) {
-                        m_nfa.addLink(rhs.termNode, sinkNode,
-                                      sampled(rhs.finalCondp->cloneTreePure(false)));
-                        m_nfa.edges.back().rejectOnFail = true;
-                    }
-                }
-            }
-            return {combNode, nullptr};
+            return buildAndCombiner(andp->lhsp(), andp->rhsp(), entryNode,
+                                    andp->fileline());
+        }
+        if (AstSIntersect* const intp = VN_CAST(nodep, SIntersect)) {
+            // IEEE 1800-2023 16.9.6: SAnd with the additional constraint
+            // that both operands match with EQUAL length. For
+            // statically-fixed equal-length sub-sequences this is identical
+            // to SAnd because both terminate at the same cycle. Variable
+            // length intersect requires per-attempt cycle counters
+            // (spec 3.7) which is left for a follow-up.
+            const int lhsLen = fixedLength(intp->lhsp());
+            const int rhsLen = fixedLength(intp->rhsp());
+            if (lhsLen < 0 || rhsLen < 0) return BuildResult::fail();
+            if (lhsLen != rhsLen) return BuildResult::fail();
+            return buildAndCombiner(intp->lhsp(), intp->rhsp(), entryNode,
+                                    intp->fileline());
         }
         if (VN_IS(nodep, LogAnd)) {
             // Boolean AND: treat as leaf with the whole expr as finalCond
