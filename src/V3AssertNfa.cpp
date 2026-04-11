@@ -49,6 +49,21 @@ struct SvaNfaNode final {
     // evaluation MUST reject per IEEE 1800-2023 16.9.9 (seq cannot complete
     // because expr1 stopped holding). These are owned clones.
     std::vector<AstNodeExpr*> throughoutConds;
+    // Counter FSM node: if `isCounter` is true, this node is not a plain
+    // register but a 2-register FSM (active + counter). It represents a
+    // [0:counterRange] wait window where the consequent can be checked at any
+    // cycle in [0, counterRange]. Used by `##[M:N]` when N-M exceeds the
+    // register-chain threshold; the M-cycle prefix is still handled by a
+    // regular delay chain. Non-overlapping (single attempt in flight) --
+    // acceptable tradeoff per spec 3.2.1, since the alternative (one register
+    // per cycle) explodes for large N-M.
+    bool isCounter = false;
+    int counterRange = 0;  // N-M for the window
+    // Liveness terminal: reached via an unbounded wait (`##[M:$]`, `[*]`,
+    // etc.). Attempts ending here never fail in finite simulation time, so
+    // reject must NOT fire from this source (IEEE weak semantics). Only
+    // accept/cover are meaningful.
+    bool isUnbounded = false;
 };
 
 struct SvaNfaEdge final {
@@ -235,21 +250,33 @@ class SvaNfaBuilder final {
 
             if (delayp->isUnbounded()) {
                 guardedEdge(currentNode, currentNode, flp);
+                m_nfa.nodes[currentNode].isUnbounded = true;
             } else {
                 const int maxDelay = getConstInt(delayp->rhsp());
                 if (maxDelay < minDelay) return BuildResult::fail();
                 const int range = maxDelay - minDelay;
-                if (range > 64) return BuildResult::fail();
-
-                const int mergeNode = scopedCreateNode();
-                guardedLink(currentNode, mergeNode, flp);
-                for (int i = 0; i < range; ++i) {
-                    const int nextNode = scopedCreateNode();
-                    guardedEdge(currentNode, nextNode, flp);
-                    guardedLink(nextNode, mergeNode, flp);
-                    currentNode = nextNode;
+                // Small ranges: register chain preserves overlapping. Large
+                // ranges would blow up Phase 1 (O(N^2) fixed point with N
+                // Links into mergeNode), so switch to a counter FSM (single
+                // attempt in flight -- spec 3.2.1).
+                constexpr int kChainLimit = 64;
+                if (range <= kChainLimit) {
+                    const int mergeNode = scopedCreateNode();
+                    guardedLink(currentNode, mergeNode, flp);
+                    for (int i = 0; i < range; ++i) {
+                        const int nextNode = scopedCreateNode();
+                        guardedEdge(currentNode, nextNode, flp);
+                        guardedLink(nextNode, mergeNode, flp);
+                        currentNode = nextNode;
+                    }
+                    currentNode = mergeNode;
+                } else {
+                    const int counterNodeId = scopedCreateNode();
+                    m_nfa.nodes[counterNodeId].isCounter = true;
+                    m_nfa.nodes[counterNodeId].counterRange = range;
+                    guardedEdge(currentNode, counterNodeId, flp);
+                    currentNode = counterNodeId;
                 }
-                currentNode = mergeNode;
             }
         } else {
             const int delayCycles = getConstInt(delayp->lhsp());
@@ -306,6 +333,9 @@ class SvaNfaBuilder final {
                 guardedEdge(reCheckNode, loopBackNode, flp);
                 guardedLink(reCheckNode, currentNode, flp);
             }
+            // Liveness terminal: the attempt can never explicitly fail in
+            // bounded time.
+            m_nfa.nodes[currentNode].isUnbounded = true;
         } else if (repp->maxCountp()) {
             const int maxN = getConstInt(repp->maxCountp());
             if (maxN < minN) return BuildResult::fail();
@@ -349,6 +379,8 @@ class SvaNfaBuilder final {
                         sampled(exprp->cloneTreePure(false)), flp);
             currentNode = matchNode;
         }
+        // `[->N]` waits unboundedly for each match -- liveness terminal.
+        m_nfa.nodes[currentNode].isUnbounded = true;
         return {currentNode, nullptr};
     }
 
@@ -501,9 +533,30 @@ public:
             }
         }
 
-        // Create state registers
+        // Create state registers.
+        // Counter FSM nodes get their own pair of registers (active + counter)
+        // and are NOT treated as plain registered state bits -- their Phase 2
+        // update is emitted as a separate always block further down.
         std::vector<AstVar*> stateVars(N, nullptr);
+        std::vector<AstVar*> counterActiveVars(N, nullptr);
+        std::vector<AstVar*> counterCountVars(N, nullptr);
+        AstNodeDType* const u32DType = m_modp->findBasicDType(VBasicDTypeKwd::UINT32);
         for (int i = 0; i < N; ++i) {
+            if (nfa.nodes[i].isCounter) {
+                const std::string base = baseName + "__c" + std::to_string(i);
+                AstVar* const activep = new AstVar{flp, VVarType::MODULETEMP,
+                                                   base + "_active",
+                                                   m_modp->findBitDType()};
+                activep->lifetime(VLifetime::STATIC_EXPLICIT);
+                m_modp->addStmtsp(activep);
+                counterActiveVars[i] = activep;
+                AstVar* const cntp = new AstVar{flp, VVarType::MODULETEMP,
+                                                base + "_cnt", u32DType};
+                cntp->lifetime(VLifetime::STATIC_EXPLICIT);
+                m_modp->addStmtsp(cntp);
+                counterCountVars[i] = cntp;
+                continue;
+            }
             if (!needsReg[i]) continue;
             if (i == nfa.startNode || nfa.nodes[i].isAccept || nfa.nodes[i].isReject) continue;
             const std::string varName = baseName + "__s" + std::to_string(i);
@@ -520,6 +573,11 @@ public:
         for (int i = 0; i < N; ++i) {
             if (stateVars[i]) {
                 stateSig[i] = new AstVarRef{flp, stateVars[i], VAccess::READ};
+            } else if (counterActiveVars[i]) {
+                // Counter FSM: state is "active && in-window". Since counter
+                // never exceeds counterRange while active, active_reg alone
+                // identifies being in the [0, counterRange] window.
+                stateSig[i] = new AstVarRef{flp, counterActiveVars[i], VAccess::READ};
             }
         }
 
@@ -588,6 +646,101 @@ public:
             m_modp->addStmtsp(alwaysp);
         }
 
+        // Phase 2b: Counter FSM always block.
+        // For each counter node, emit:
+        //   if (active) begin
+        //     if (accepted_now || counter == range) active <= 0;
+        //     else counter <= counter + 1;
+        //   end else if (incoming) begin
+        //     active <= 1; counter <= 0;
+        //   end
+        // where accepted_now = stateSig[counter] && $sampled(acceptCondp)
+        //   and incoming = OR of stateSig[source] && edge.condp && !disable
+        //                  for every Edge into this counter node.
+        for (int ci = 0; ci < N; ++ci) {
+            if (!counterActiveVars[ci]) continue;
+            AstVar* const activep = counterActiveVars[ci];
+            AstVar* const cntp = counterCountVars[ci];
+            const uint32_t range
+                = static_cast<uint32_t>(nfa.nodes[ci].counterRange);
+
+            // incoming = OR of edge-driven contributions from upstream states
+            AstNodeExpr* incomingp = nullptr;
+            for (const auto& edge : nfa.edges) {
+                if (edge.toId != ci) continue;
+                if (!edge.consumesCycle) continue;
+                if (!stateSig[edge.fromId]) continue;
+                AstNodeExpr* contrib
+                    = stateSig[edge.fromId]->cloneTreePure(false);
+                contrib = andCond(flp, contrib, edge.condp);
+                if (disableExprp) {
+                    AstNodeExpr* const notDisp
+                        = new AstNot{flp, disableExprp->cloneTreePure(false)};
+                    notDisp->dtypeSetBit();
+                    contrib = new AstAnd{flp, contrib, notDisp};
+                    contrib->dtypeSetBit();
+                }
+                incomingp = orExprs(flp, incomingp, contrib);
+            }
+            if (!incomingp) incomingp = new AstConst{flp, AstConst::BitFalse{}};
+
+            // accepted_now = active && $sampled(acceptCondp)
+            // If acceptCondp is nullptr, treat as always-match once in window.
+            AstNodeExpr* acceptedNowp = nullptr;
+            if (acceptCondp) {
+                AstSampled* const sampp
+                    = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
+                sampp->dtypeSetBit();
+                acceptedNowp = new AstAnd{flp,
+                    new AstVarRef{flp, activep, VAccess::READ}, sampp};
+                acceptedNowp->dtypeSetBit();
+            } else {
+                acceptedNowp = new AstVarRef{flp, activep, VAccess::READ};
+            }
+
+            // counter_at_end = counter == range
+            AstNodeExpr* const counterAtEndp = new AstEq{flp,
+                new AstVarRef{flp, cntp, VAccess::READ},
+                new AstConst{flp, AstConst::WidthedValue{}, 32, range}};
+            counterAtEndp->dtypeSetBit();
+
+            // done = accepted_now || counter == range
+            AstNodeExpr* const donep = new AstOr{flp, acceptedNowp, counterAtEndp};
+            donep->dtypeSetBit();
+
+            // then-branch: active <= 0
+            AstAssignDly* const clearActivep = new AstAssignDly{flp,
+                new AstVarRef{flp, activep, VAccess::WRITE},
+                new AstConst{flp, AstConst::BitFalse{}}};
+            // else-branch: counter <= counter + 1
+            AstAdd* const addExprp = new AstAdd{flp,
+                new AstVarRef{flp, cntp, VAccess::READ},
+                new AstConst{flp, AstConst::WidthedValue{}, 32, 1u}};
+            addExprp->dtypeFrom(cntp);
+            AstAssignDly* const incCountp = new AstAssignDly{flp,
+                new AstVarRef{flp, cntp, VAccess::WRITE}, addExprp};
+            AstIf* const doneIfp
+                = new AstIf{flp, donep, clearActivep, incCountp};
+
+            // if (active) { doneIfp } else if (incoming) { active<=1; cnt<=0; }
+            AstAssignDly* const setActivep = new AstAssignDly{flp,
+                new AstVarRef{flp, activep, VAccess::WRITE},
+                new AstConst{flp, AstConst::BitTrue{}}};
+            AstAssignDly* const resetCountp = new AstAssignDly{flp,
+                new AstVarRef{flp, cntp, VAccess::WRITE},
+                new AstConst{flp, AstConst::WidthedValue{}, 32, 0u}};
+            setActivep->addNext(resetCountp);
+            AstIf* const startIfp
+                = new AstIf{flp, incomingp, setActivep, nullptr};
+            AstIf* const topIfp = new AstIf{flp,
+                new AstVarRef{flp, activep, VAccess::READ},
+                doneIfp, startIfp};
+
+            AstAlways* const counterAlwaysp = new AstAlways{flp,
+                VAlwaysKwd::ALWAYS, senTreep->cloneTree(false), topIfp};
+            m_modp->addStmtsp(counterAlwaysp);
+        }
+
         // Phase 3: Compute accept/reject from Links to accept node + acceptCondp
         // The accept node receives Links from terminal NFA nodes.
         // acceptCondp is the final boolean check from the builder.
@@ -596,7 +749,11 @@ public:
         // accept = terminal_active && acceptCondp
         // reject = terminal_active && !acceptCondp
 
+        // terminalActivep: for accept/cover (any source contributes).
+        // rejectBasep:     for reject (counter sources contribute only at
+        //                  window end, not every in-window cycle).
         AstNodeExpr* terminalActivep = nullptr;
+        AstNodeExpr* rejectBasep = nullptr;
         for (const auto& edge : nfa.edges) {
             if (edge.toId != nfa.acceptNode) continue;
             if (edge.consumesCycle) continue;
@@ -604,7 +761,32 @@ public:
 
             AstNodeExpr* srcSig = stateSig[edge.fromId]->cloneTreePure(false);
             srcSig = andCond(flp, srcSig, edge.condp);
-            terminalActivep = orExprs(flp, terminalActivep, srcSig);
+
+            if (nfa.nodes[edge.fromId].isCounter) {
+                const int ci = edge.fromId;
+                // Accept: use srcSig as-is (active && link_cond)
+                terminalActivep = orExprs(flp, terminalActivep,
+                                          srcSig->cloneTreePure(false));
+                // Reject base: srcSig && (counter == counterRange)
+                AstNodeExpr* const atEndp = new AstEq{flp,
+                    new AstVarRef{flp, counterCountVars[ci], VAccess::READ},
+                    new AstConst{flp, AstConst::WidthedValue{}, 32,
+                                 static_cast<uint32_t>(nfa.nodes[ci].counterRange)}};
+                atEndp->dtypeSetBit();
+                AstNodeExpr* const expireContribp
+                    = new AstAnd{flp, srcSig, atEndp};
+                expireContribp->dtypeSetBit();
+                rejectBasep = orExprs(flp, rejectBasep, expireContribp);
+            } else if (nfa.nodes[edge.fromId].isUnbounded) {
+                // Liveness terminal: contributes to accept/cover only.
+                // Reject never fires (IEEE weak semantics).
+                terminalActivep
+                    = orExprs(flp, terminalActivep, srcSig);
+            } else {
+                terminalActivep = orExprs(flp, terminalActivep,
+                                          srcSig->cloneTreePure(false));
+                rejectBasep = orExprs(flp, rejectBasep, srcSig);
+            }
         }
 
         // If no Links to accept, check stateSig at the last registered node
@@ -688,8 +870,9 @@ public:
         if (isCover) {
             // Cover property uses accept signal, not !reject.
             // Throughout-drop doesn't affect cover (cover is about "did it
-            // match", not "did it fail").
+            // match", not "did it fail"). rejectBasep is also unused by cover.
             if (throughoutRejectp) throughoutRejectp->deleteTree();
+            if (rejectBasep) rejectBasep->deleteTree();
             if (acceptCondp) {
                 AstNodeExpr* const sampledCondp
                     = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
@@ -703,19 +886,22 @@ public:
         }
 
         // Assert/assume: output = !reject
-        // Base reject: terminal reached with finalCond false.
+        // Base reject: a source whose reject window is "now" didn't match.
+        // For non-counter sources that's "any cycle the attempt reaches the
+        // accept Link"; for counter sources that's "window's last cycle".
         AstNodeExpr* rejectp = nullptr;
-        if (acceptCondp) {
+        if (acceptCondp && rejectBasep) {
             AstNodeExpr* const sampledCondp
                 = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
             sampledCondp->dtypeFrom(acceptCondp);
             AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
             notCondp->dtypeSetBit();
-            rejectp = new AstAnd{flp, terminalActivep, notCondp};
+            rejectp = new AstAnd{flp, rejectBasep, notCondp};
             rejectp->dtypeSetBit();
-        } else {
-            terminalActivep->deleteTree();  // unused, never rejects via terminal
+        } else if (rejectBasep) {
+            rejectBasep->deleteTree();
         }
+        if (terminalActivep) terminalActivep->deleteTree();  // cover branch exited earlier
 
         // OR in throughout-drop reject
         if (throughoutRejectp) {
