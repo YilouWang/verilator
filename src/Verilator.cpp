@@ -19,6 +19,7 @@
 #include "V3Active.h"
 #include "V3ActiveTop.h"
 #include "V3Assert.h"
+#include "V3AssertNfa.h"
 #include "V3AssertPre.h"
 #include "V3AssertProp.h"
 #include "V3Ast.h"
@@ -252,6 +253,8 @@ static void process() {
 
         // Assertion insertion
         //    After we've added block coverage, but before other nasty transforms
+        V3AssertNfa::assertNfaAll(v3Global.rootp());
+        //
         V3AssertProp::assertPropAll(v3Global.rootp());
         //
         V3AssertPre::assertPreAll(v3Global.rootp());

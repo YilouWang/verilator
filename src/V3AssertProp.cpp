@@ -1432,15 +1432,8 @@ public:
 // Top AssertProp class
 
 void V3AssertProp::assertPropAll(AstNetlist* nodep) {
-    UINFO(2, __FUNCTION__ << ":");
-    // Lower range/unbounded consecutive repetition before DFA graph building
-    { AssertPropConsRepVisitor{nodep}; }
-    { RangeDelayExpander{nodep}; }
-    { AssertPropLowerVisitor{nodep}; }
-    {
-        V3Graph graph;
-        { AssertPropBuildVisitor{nodep, graph}; }
-        AssertPropTransformer{graph};
-    }
+    UINFO(2, __FUNCTION__ << ": (NFA handles multi-cycle -- no legacy lowering)" << endl);
+    // V3AssertNfa handles all multi-cycle assertions. Any remaining sequence nodes
+    // would have been reported as UNSUPPORTED by V3AssertNfa. No legacy lowering here.
     V3Global::dumpCheckGlobalTree("assertproperties", 0, dumpTreeEitherLevel() >= 3);
 }
