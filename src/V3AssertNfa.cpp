@@ -43,6 +43,12 @@ struct SvaNfaNode final {
     int id;
     bool isAccept = false;
     bool isReject = false;
+    // Throughout scope: if non-empty, this node represents an attempt that is
+    // alive inside one or more `expr throughout seq` scopes. If any of these
+    // exprs drop (sampled value false) while this node is active, the
+    // evaluation MUST reject per IEEE 1800-2023 16.9.9 (seq cannot complete
+    // because expr1 stopped holding). These are owned clones.
+    std::vector<AstNodeExpr*> throughoutConds;
 };
 
 struct SvaNfaEdge final {
@@ -66,6 +72,11 @@ struct SvaNfa final {
                 edge.condp->deleteTree();
                 edge.condp = nullptr;
             }
+        }
+        // Free per-node throughout condition clones
+        for (auto& node : nodes) {
+            for (auto* cp : node.throughoutConds) cp->deleteTree();
+            node.throughoutConds.clear();
         }
     }
 
@@ -150,11 +161,43 @@ class SvaNfaBuilder final {
         return sp;
     }
 
+    // Create a new NFA node and record the current throughout scope on it.
+    // Every node created inside a `expr throughout seq` scope inherits the
+    // guard so the emitter can turn "state alive AND guard dropped" into an
+    // explicit reject (IEEE 16.9.9: the evaluation must fail when expr1 stops
+    // holding, even if seq never reaches its terminal).
+    int scopedCreateNode() {
+        const int id = m_nfa.createNode();
+        auto& node = m_nfa.nodes[id];
+        for (AstNodeExpr* const cp : m_throughoutStack) {
+            node.throughoutConds.push_back(cp->cloneTreePure(false));
+        }
+        return id;
+    }
+
+    // All builder-level edges/links MUST go through these helpers so the
+    // current throughout stack is always AND'd into the condition. This is the
+    // single invariant that makes nested/complex throughout RHS work (IEEE
+    // 16.9.9: the throughout expression is checked at every tick of the
+    // guarded sequence, including zero-delay links).
+    void guardedLink(int from, int to, AstNodeExpr* condp, FileLine* flp) {
+        m_nfa.addLink(from, to, throughoutCond(condp, flp));
+    }
+    void guardedLink(int from, int to, FileLine* flp) {
+        m_nfa.addLink(from, to, throughoutCond(nullptr, flp));
+    }
+    void guardedEdge(int from, int to, AstNodeExpr* condp, FileLine* flp) {
+        m_nfa.addClockEdge(from, to, throughoutCond(condp, flp));
+    }
+    void guardedEdge(int from, int to, FileLine* flp) {
+        m_nfa.addClockEdge(from, to, throughoutCond(nullptr, flp));
+    }
+
     int addDelayChain(int startNode, int n, FileLine* flp) {
         int current = startNode;
         for (int i = 0; i < n; ++i) {
-            const int next = m_nfa.createNode();
-            m_nfa.addClockEdge(current, next, throughoutCond(nullptr, flp));
+            const int next = scopedCreateNode();
+            guardedEdge(current, next, flp);
             current = next;
         }
         return current;
@@ -175,9 +218,9 @@ class SvaNfaBuilder final {
             if (!pre.valid()) return BuildResult::fail();
             // If pre has a final condition, add it as a conditioned Link
             if (pre.finalCondp) {
-                const int condNode = m_nfa.createNode();
-                m_nfa.addLink(pre.termNode, condNode,
-                              sampled(pre.finalCondp->cloneTreePure(false)));
+                const int condNode = scopedCreateNode();
+                guardedLink(pre.termNode, condNode,
+                            sampled(pre.finalCondp->cloneTreePure(false)), flp);
                 currentNode = condNode;
             } else {
                 currentNode = pre.termNode;
@@ -191,21 +234,19 @@ class SvaNfaBuilder final {
             currentNode = addDelayChain(currentNode, minDelay, flp);
 
             if (delayp->isUnbounded()) {
-                m_nfa.addClockEdge(currentNode, currentNode,
-                                   throughoutCond(nullptr, flp));
+                guardedEdge(currentNode, currentNode, flp);
             } else {
                 const int maxDelay = getConstInt(delayp->rhsp());
                 if (maxDelay < minDelay) return BuildResult::fail();
                 const int range = maxDelay - minDelay;
                 if (range > 64) return BuildResult::fail();
 
-                const int mergeNode = m_nfa.createNode();
-                m_nfa.addLink(currentNode, mergeNode);
+                const int mergeNode = scopedCreateNode();
+                guardedLink(currentNode, mergeNode, flp);
                 for (int i = 0; i < range; ++i) {
-                    const int nextNode = m_nfa.createNode();
-                    m_nfa.addClockEdge(currentNode, nextNode,
-                                       throughoutCond(nullptr, flp));
-                    m_nfa.addLink(nextNode, mergeNode);
+                    const int nextNode = scopedCreateNode();
+                    guardedEdge(currentNode, nextNode, flp);
+                    guardedLink(nextNode, mergeNode, flp);
                     currentNode = nextNode;
                 }
                 currentNode = mergeNode;
@@ -235,54 +276,48 @@ class SvaNfaBuilder final {
         int currentNode = entryNode;
         for (int i = 0; i < minN; ++i) {
             if (i > 0) {
-                const int nextNode = m_nfa.createNode();
-                m_nfa.addClockEdge(currentNode, nextNode,
-                                   throughoutCond(nullptr, flp));
+                const int nextNode = scopedCreateNode();
+                guardedEdge(currentNode, nextNode, flp);
                 currentNode = nextNode;
             }
             // Add bool check as conditioned Link
-            const int condNode = m_nfa.createNode();
-            m_nfa.addLink(currentNode, condNode,
-                          sampled(exprp->cloneTreePure(false)));
+            const int condNode = scopedCreateNode();
+            guardedLink(currentNode, condNode,
+                        sampled(exprp->cloneTreePure(false)), flp);
             currentNode = condNode;
         }
 
         if (repp->unbounded()) {
             if (minN == 0) {
-                const int waitNode = m_nfa.createNode();
-                m_nfa.addClockEdge(currentNode, waitNode,
-                                   throughoutCond(nullptr, flp));
-                const int checkNode = m_nfa.createNode();
-                m_nfa.addLink(waitNode, checkNode,
-                              sampled(exprp->cloneTreePure(false)));
-                m_nfa.addClockEdge(checkNode, waitNode,
-                                   throughoutCond(nullptr, flp));
-                m_nfa.addLink(currentNode, checkNode);
+                const int waitNode = scopedCreateNode();
+                guardedEdge(currentNode, waitNode, flp);
+                const int checkNode = scopedCreateNode();
+                guardedLink(waitNode, checkNode,
+                            sampled(exprp->cloneTreePure(false)), flp);
+                guardedEdge(checkNode, waitNode, flp);
+                guardedLink(currentNode, checkNode, flp);
                 currentNode = checkNode;
             } else {
-                const int loopBackNode = m_nfa.createNode();
-                m_nfa.addClockEdge(currentNode, loopBackNode,
-                                   throughoutCond(nullptr, flp));
-                const int reCheckNode = m_nfa.createNode();
-                m_nfa.addLink(loopBackNode, reCheckNode,
-                              sampled(exprp->cloneTreePure(false)));
-                m_nfa.addClockEdge(reCheckNode, loopBackNode,
-                                   throughoutCond(nullptr, flp));
-                m_nfa.addLink(reCheckNode, currentNode);
+                const int loopBackNode = scopedCreateNode();
+                guardedEdge(currentNode, loopBackNode, flp);
+                const int reCheckNode = scopedCreateNode();
+                guardedLink(loopBackNode, reCheckNode,
+                            sampled(exprp->cloneTreePure(false)), flp);
+                guardedEdge(reCheckNode, loopBackNode, flp);
+                guardedLink(reCheckNode, currentNode, flp);
             }
         } else if (repp->maxCountp()) {
             const int maxN = getConstInt(repp->maxCountp());
             if (maxN < minN) return BuildResult::fail();
-            const int mergeNode = m_nfa.createNode();
-            m_nfa.addLink(currentNode, mergeNode);
+            const int mergeNode = scopedCreateNode();
+            guardedLink(currentNode, mergeNode, flp);
             for (int i = minN; i < maxN; ++i) {
-                const int nextNode = m_nfa.createNode();
-                m_nfa.addClockEdge(currentNode, nextNode,
-                                   throughoutCond(nullptr, flp));
-                const int checkNode = m_nfa.createNode();
-                m_nfa.addLink(nextNode, checkNode,
-                              sampled(exprp->cloneTreePure(false)));
-                m_nfa.addLink(checkNode, mergeNode);
+                const int nextNode = scopedCreateNode();
+                guardedEdge(currentNode, nextNode, flp);
+                const int checkNode = scopedCreateNode();
+                guardedLink(nextNode, checkNode,
+                            sampled(exprp->cloneTreePure(false)), flp);
+                guardedLink(checkNode, mergeNode, flp);
                 currentNode = checkNode;
             }
             currentNode = mergeNode;
@@ -299,43 +334,44 @@ class SvaNfaBuilder final {
 
         int currentNode = entryNode;
         for (int i = 0; i < n; ++i) {
-            const int waitNode = m_nfa.createNode();
+            const int waitNode = scopedCreateNode();
             if (i == 0) {
-                m_nfa.addLink(currentNode, waitNode);
+                guardedLink(currentNode, waitNode, flp);
             } else {
-                m_nfa.addClockEdge(currentNode, waitNode,
-                                   throughoutCond(nullptr, flp));
+                guardedEdge(currentNode, waitNode, flp);
             }
             AstNodeExpr* const notExprp
                 = new AstNot{flp, exprp->cloneTreePure(false)};
             notExprp->dtypeSetBit();
-            m_nfa.addClockEdge(waitNode, waitNode,
-                               throughoutCond(sampled(notExprp), flp));
-            const int matchNode = m_nfa.createNode();
-            m_nfa.addLink(waitNode, matchNode,
-                          throughoutCond(sampled(exprp->cloneTreePure(false)), flp));
+            guardedEdge(waitNode, waitNode, sampled(notExprp), flp);
+            const int matchNode = scopedCreateNode();
+            guardedLink(waitNode, matchNode,
+                        sampled(exprp->cloneTreePure(false)), flp);
             currentNode = matchNode;
         }
         return {currentNode, nullptr};
     }
 
     BuildResult buildThroughout(AstSThroughout* nodep, int entryNode) {
-        // Only handle throughout with simple delay sequences in RHS.
-        // Complex RHS (range delays, repetition, nested throughout, SOr/SAnd)
-        // may not be correctly guarded -- defer to V3AssertProp.
-        AstNodeExpr* const rhsp = nodep->rhsp();
-        bool hasComplex = false;
-        rhsp->foreach([&hasComplex](const AstConsRep*) { hasComplex = true; });
-        if (!hasComplex) rhsp->foreach([&hasComplex](const AstSGotoRep*) { hasComplex = true; });
-        if (!hasComplex) rhsp->foreach([&hasComplex](const AstSThroughout*) { hasComplex = true; });
-        if (!hasComplex) rhsp->foreach([&hasComplex](const AstSIntersect*) { hasComplex = true; });
-        if (!hasComplex) rhsp->foreach([&hasComplex](const AstSOr*) { hasComplex = true; });
-        if (!hasComplex) rhsp->foreach([&hasComplex](const AstSAnd*) { hasComplex = true; });
-        if (hasComplex) return BuildResult::fail();
+        // The entryNode may have been created outside this throughout scope
+        // (e.g. the antecedent trigNode for `a |-> (cond throughout seq)`).
+        // Mark it with the guard so that "cond is false at tick 0 when the
+        // antecedent fires" is detected as a throughout-drop reject.
+        m_nfa.nodes[entryNode].throughoutConds.push_back(
+            nodep->lhsp()->cloneTreePure(false));
 
+        // Push the guard onto the throughout stack. Every builder-level
+        // edge/link created while this stack is non-empty is automatically
+        // AND'd with the guard via guardedLink/guardedEdge. This invariant
+        // makes nested repetition/SOr/SAnd/throughout/intersect RHS work
+        // without per-node special casing.
         m_throughoutStack.push_back(nodep->lhsp());
-        const BuildResult result = buildExpr(rhsp, entryNode);
+        const BuildResult result = buildExpr(nodep->rhsp(), entryNode);
         m_throughoutStack.pop_back();
+        // finalCondp is a pointer to an AST-linked expression; the emitter
+        // clones it when emitting the reject check. The accept edge already
+        // has the throughout guard AND'd in via guardedLink, so the "seq
+        // reaches accept" signal is properly guarded. Nothing extra to do.
         return result;
     }
 
@@ -362,42 +398,42 @@ public:
             return buildThroughout(throughoutp, entryNode);
         }
         if (AstSOr* const orp = VN_CAST(nodep, SOr)) {
+            FileLine* const flp = orp->fileline();
             const BuildResult lhs = buildExpr(orp->lhsp(), entryNode);
             const BuildResult rhs = buildExpr(orp->rhsp(), entryNode);
             if (!lhs.valid() || !rhs.valid()) return BuildResult::fail();
-            // Merge: both branches connect to a merge node
-            const int mergeNode = m_nfa.createNode();
-            // If either branch has a finalCond, add it as a conditioned Link
+            const int mergeNode = scopedCreateNode();
             if (lhs.finalCondp) {
-                m_nfa.addLink(lhs.termNode, mergeNode,
-                              sampled(lhs.finalCondp->cloneTreePure(false)));
+                guardedLink(lhs.termNode, mergeNode,
+                            sampled(lhs.finalCondp->cloneTreePure(false)), flp);
             } else {
-                m_nfa.addLink(lhs.termNode, mergeNode);
+                guardedLink(lhs.termNode, mergeNode, flp);
             }
             if (rhs.finalCondp) {
-                m_nfa.addLink(rhs.termNode, mergeNode,
-                              sampled(rhs.finalCondp->cloneTreePure(false)));
+                guardedLink(rhs.termNode, mergeNode,
+                            sampled(rhs.finalCondp->cloneTreePure(false)), flp);
             } else {
-                m_nfa.addLink(rhs.termNode, mergeNode);
+                guardedLink(rhs.termNode, mergeNode, flp);
             }
             return {mergeNode, nullptr};
         }
         if (AstLogOr* const orp = VN_CAST(nodep, LogOr)) {
+            FileLine* const flp = orp->fileline();
             const BuildResult lhs = buildExpr(orp->lhsp(), entryNode);
             const BuildResult rhs = buildExpr(orp->rhsp(), entryNode);
             if (!lhs.valid() || !rhs.valid()) return BuildResult::fail();
-            const int mergeNode = m_nfa.createNode();
+            const int mergeNode = scopedCreateNode();
             if (lhs.finalCondp) {
-                m_nfa.addLink(lhs.termNode, mergeNode,
-                              sampled(lhs.finalCondp->cloneTreePure(false)));
+                guardedLink(lhs.termNode, mergeNode,
+                            sampled(lhs.finalCondp->cloneTreePure(false)), flp);
             } else {
-                m_nfa.addLink(lhs.termNode, mergeNode);
+                guardedLink(lhs.termNode, mergeNode, flp);
             }
             if (rhs.finalCondp) {
-                m_nfa.addLink(rhs.termNode, mergeNode,
-                              sampled(rhs.finalCondp->cloneTreePure(false)));
+                guardedLink(rhs.termNode, mergeNode,
+                            sampled(rhs.finalCondp->cloneTreePure(false)), flp);
             } else {
-                m_nfa.addLink(rhs.termNode, mergeNode);
+                guardedLink(rhs.termNode, mergeNode, flp);
             }
             return {mergeNode, nullptr};
         }
@@ -416,7 +452,7 @@ public:
 
     // Build complete NFA for a standalone sequence.
     BuildResult build(AstNodeExpr* exprp) {
-        m_nfa.startNode = m_nfa.createNode();
+        m_nfa.startNode = scopedCreateNode();
         return buildExpr(exprp, m_nfa.startNode);
     }
 };
@@ -586,6 +622,44 @@ public:
             terminalActivep = new AstConst{flp, AstConst::BitFalse{}};
         }
 
+        // Phase 3b: Throughout-drop rejection.
+        // For every node that was created inside a `expr throughout seq` scope,
+        // emit fail_i = state_active[i] && !$sampled(AND of throughout exprs).
+        // If any such fail fires, the evaluation MUST reject per IEEE 16.9.9 --
+        // the seq can never reach its terminal because the guarded expression
+        // stopped holding.
+        // Uses registered state bit when available, else the combinational
+        // stateSig (covers nodes reached only via Links).
+        AstNodeExpr* throughoutRejectp = nullptr;
+        for (int i = 0; i < N; ++i) {
+            const auto& conds = nfa.nodes[i].throughoutConds;
+            if (conds.empty()) continue;
+            AstNodeExpr* stateExprp = nullptr;
+            if (stateVars[i]) {
+                stateExprp = new AstVarRef{flp, stateVars[i], VAccess::READ};
+            } else if (stateSig[i]) {
+                stateExprp = stateSig[i]->cloneTreePure(false);
+            } else {
+                continue;
+            }
+            AstNodeExpr* guardp = nullptr;
+            for (AstNodeExpr* const cp : conds) {
+                AstSampled* const sp = new AstSampled{flp, cp->cloneTreePure(false)};
+                sp->dtypeSetBit();
+                if (!guardp) {
+                    guardp = sp;
+                } else {
+                    guardp = new AstAnd{flp, guardp, sp};
+                    guardp->dtypeSetBit();
+                }
+            }
+            AstNodeExpr* const notGuardp = new AstNot{flp, guardp};
+            notGuardp->dtypeSetBit();
+            AstNodeExpr* const failp = new AstAnd{flp, stateExprp, notGuardp};
+            failp->dtypeSetBit();
+            throughoutRejectp = orExprs(flp, throughoutRejectp, failp);
+        }
+
         // Clean up ALL stateSig entries -- they've been cloned where needed
         // (Phase 2/3 always clone from stateSig before incorporating into AST)
         for (int i = 0; i < N; ++i) {
@@ -594,6 +668,17 @@ public:
                 stateSig[i] = nullptr;
             }
         }
+        // disable iff applied to throughout-drop reject: dropping the guard
+        // during disable is NOT a failure (the evaluation is abandoned per
+        // IEEE 16.12).
+        if (throughoutRejectp && disableExprp) {
+            AstNodeExpr* const notDisp
+                = new AstNot{flp, disableExprp->cloneTreePure(false)};
+            notDisp->dtypeSetBit();
+            throughoutRejectp = new AstAnd{flp, throughoutRejectp, notDisp};
+            throughoutRejectp->dtypeSetBit();
+        }
+
         // Clean up disableExprp if passed (was cloned in Phase 2, original not attached)
         if (disableExprp) {
             disableExprp->deleteTree();
@@ -601,7 +686,10 @@ public:
         }
 
         if (isCover) {
-            // Cover property uses accept signal, not !reject
+            // Cover property uses accept signal, not !reject.
+            // Throughout-drop doesn't affect cover (cover is about "did it
+            // match", not "did it fail").
+            if (throughoutRejectp) throughoutRejectp->deleteTree();
             if (acceptCondp) {
                 AstNodeExpr* const sampledCondp
                     = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
@@ -615,22 +703,33 @@ public:
         }
 
         // Assert/assume: output = !reject
+        // Base reject: terminal reached with finalCond false.
+        AstNodeExpr* rejectp = nullptr;
         if (acceptCondp) {
-            // reject = terminal_active && !$sampled(acceptCond)
             AstNodeExpr* const sampledCondp
                 = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
             sampledCondp->dtypeFrom(acceptCondp);
             AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
             notCondp->dtypeSetBit();
-            AstNodeExpr* const rejectp
-                = new AstAnd{flp, terminalActivep, notCondp};
+            rejectp = new AstAnd{flp, terminalActivep, notCondp};
             rejectp->dtypeSetBit();
-            AstNodeExpr* const resultExprp = new AstNot{flp, rejectp};
-            resultExprp->dtypeSetBit();
-            return resultExprp;
+        } else {
+            terminalActivep->deleteTree();  // unused, never rejects via terminal
         }
-        // No condition: unconditional accept → never rejects
-        return new AstConst{flp, AstConst::BitTrue{}};
+
+        // OR in throughout-drop reject
+        if (throughoutRejectp) {
+            rejectp = orExprs(flp, rejectp, throughoutRejectp);
+            if (rejectp) rejectp->dtypeSetBit();
+        }
+
+        if (!rejectp) {
+            // No condition: unconditional accept -> never rejects
+            return new AstConst{flp, AstConst::BitTrue{}};
+        }
+        AstNodeExpr* const resultExprp = new AstNot{flp, rejectp};
+        resultExprp->dtypeSetBit();
+        return resultExprp;
     }
 };
 
