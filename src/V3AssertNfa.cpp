@@ -65,6 +65,24 @@ struct SvaNfaNode final {
     // reject must NOT fire from this source (IEEE weak semantics). Only
     // accept/cover are meaningful.
     bool isUnbounded = false;
+    // Temporal sequence-AND combiner: aggregates two parallel sub-NFA
+    // accept signals via done-latches per IEEE 16.9.5 (end time = max of
+    // both operands). Emitter allocates per-combiner `doneL`/`doneR`
+    // registers, computes stateSig as the combined accept formula, and
+    // emits a dedicated always block updating the latches. Accept-only
+    // (never contributes to reject -- sub-sequences emit their own rejects).
+    bool isAndCombiner = false;
+    int andLhsTermId = -1;
+    int andRhsTermId = -1;
+    AstNodeExpr* andLhsCondp = nullptr;  // OWNED; may be null
+    AstNodeExpr* andRhsCondp = nullptr;  // OWNED; may be null
+    // Reject-only sink: a node that exists solely as a target for
+    // rejectOnFail Links (Phase 3a). It must not participate in Phase 1
+    // stateSig propagation (it has no meaningful "active" semantics) and
+    // must not appear in Phase 2/Phase 3 enumerations. Used by SAnd to
+    // wire sub-sequence terminal-boolean rejects without polluting the
+    // combiner's accept formula.
+    bool isRejectSink = false;
 };
 
 struct SvaNfaEdge final {
@@ -96,10 +114,18 @@ struct SvaNfa final {
                 edge.condp = nullptr;
             }
         }
-        // Free per-node throughout condition clones
+        // Free per-node throughout condition clones and SAnd combiner operands
         for (auto& node : nodes) {
             for (auto* cp : node.throughoutConds) cp->deleteTree();
             node.throughoutConds.clear();
+            if (node.andLhsCondp) {
+                node.andLhsCondp->deleteTree();
+                node.andLhsCondp = nullptr;
+            }
+            if (node.andRhsCondp) {
+                node.andRhsCondp->deleteTree();
+                node.andRhsCondp = nullptr;
+            }
         }
     }
 
@@ -374,13 +400,19 @@ class SvaNfaBuilder final {
             currentNode = addDelayChain(currentNode, delayCycles, flp);
         }
 
-        // Handle RHS -- return it as finalCond, NOT as a Link node
+        // Handle RHS. If it is itself a multi-cycle construct (nested
+        // SExpr, SAnd, SOr, ConsRep, etc.) recurse via buildExpr so the
+        // construct is properly compiled into the NFA. Only a *plain*
+        // boolean leaf is returned as finalCondp -- otherwise the emitter
+        // would try to use the multi-cycle subtree as a sampled boolean,
+        // which produces invalid AST and silently broken assertions.
         AstNodeExpr* const exprp = sexprp->exprp();
-        if (AstSExpr* const rhsSExprp = VN_CAST(exprp, SExpr)) {
-            // Nested SExpr: recurse (its finalCond becomes ours).
-            // rangeMidSources should be empty here because we picked the
-            // mergeNode path for nested RHS.
-            return buildSExpr(rhsSExprp, currentNode);
+        if (VN_IS(exprp, SExpr) || VN_IS(exprp, SAnd) || VN_IS(exprp, SOr)
+            || VN_IS(exprp, ConsRep) || VN_IS(exprp, SGotoRep)
+            || VN_IS(exprp, SThroughout) || VN_IS(exprp, SIntersect)) {
+            // rangeMidSources should be empty here because the chain path
+            // is only taken for pure-boolean RHS.
+            return buildExpr(exprp, currentNode);
         }
         // Simple boolean RHS: this is the final condition.
         return {currentNode, exprp, std::move(rangeMidSources)};
@@ -567,10 +599,89 @@ public:
             }
             return {mergeNode, nullptr};
         }
-        if (VN_IS(nodep, SAnd)) {
-            // Temporal sequence AND requires parallel NFA with done-latch --
-            // not yet implemented. Defer to V3AssertProp.
-            return BuildResult::fail();
+        if (AstSAnd* const andp = VN_CAST(nodep, SAnd)) {
+            // Temporal sequence AND: per IEEE 1800-2023 16.9.5, both
+            // operands must match, with end time = max of the two. We build
+            // disjoint sub-NFAs for LHS and RHS (both sharing the entry node
+            // only -- downstream nodes are disjoint per spec 2.2.1 join-point
+            // invariant) and aggregate their accept signals in a combiner
+            // node that the emitter specialises into done-latch hardware.
+            //
+            // Snapshot-restore m_inUnboundedScope around each sub-build so
+            // an LHS liveness wait does not spuriously mark RHS nodes as
+            // unbounded (and vice versa). The combiner itself inherits
+            // liveness only if at least one side's terminal is unbounded.
+            const bool savedScope = m_inUnboundedScope;
+            const BuildResult lhs = buildExpr(andp->lhsp(), entryNode);
+            const bool lhsScope = m_inUnboundedScope;
+            m_inUnboundedScope = savedScope;
+            const BuildResult rhs = buildExpr(andp->rhsp(), entryNode);
+            const bool rhsScope = m_inUnboundedScope;
+            m_inUnboundedScope = savedScope || lhsScope || rhsScope;
+            if (!lhs.valid() || !rhs.valid()) return BuildResult::fail();
+            // Range-delay mid-window sources in either sub-branch would need
+            // to be folded into the latch's "accept-now" signal, which the
+            // current combiner does not support. Defer (UNSUPPORTED).
+            if (!lhs.midSources.empty() || !rhs.midSources.empty()) {
+                return BuildResult::fail();
+            }
+            const int combNode = scopedCreateNode();
+            SvaNfaNode& cn = m_nfa.nodes[combNode];
+            cn.isAndCombiner = true;
+            cn.andLhsTermId = lhs.termNode;
+            cn.andRhsTermId = rhs.termNode;
+            if (lhs.finalCondp) {
+                cn.andLhsCondp = lhs.finalCondp->cloneTreePure(false);
+            }
+            if (rhs.finalCondp) {
+                cn.andRhsCondp = rhs.finalCondp->cloneTreePure(false);
+            }
+            // Liveness propagates: if either sub-sequence is liveness-only
+            // (unbounded wait), the whole AND is liveness-only too.
+            if (m_nfa.nodes[lhs.termNode].isUnbounded
+                || m_nfa.nodes[rhs.termNode].isUnbounded) {
+                cn.isUnbounded = true;
+            }
+            // Wire sub-sequence terminal-boolean rejects so each side can
+            // fail the whole AND independently when its required terminal
+            // expression drops. The combiner is accept-only, so without
+            // these explicit links the sub-sequence "reached terminal but
+            // boolean false" case would be silently swallowed. The Links
+            // target a dedicated reject sink so that Phase 1 propagation
+            // does not pollute the combiner's accept formula.
+            //
+            // Skip rejectOnFail wiring entirely when either sub-side is
+            // liveness-only -- a liveness sub-sequence is never required to
+            // terminate, so failing its boolean check is not a definitive
+            // SAnd failure.
+            if (!cn.isUnbounded) {
+                bool needSink = false;
+                if (lhs.finalCondp
+                    && !m_nfa.nodes[lhs.termNode].isUnbounded) {
+                    needSink = true;
+                }
+                if (rhs.finalCondp
+                    && !m_nfa.nodes[rhs.termNode].isUnbounded) {
+                    needSink = true;
+                }
+                if (needSink) {
+                    const int sinkNode = m_nfa.createNode();
+                    m_nfa.nodes[sinkNode].isRejectSink = true;
+                    if (lhs.finalCondp
+                        && !m_nfa.nodes[lhs.termNode].isUnbounded) {
+                        m_nfa.addLink(lhs.termNode, sinkNode,
+                                      sampled(lhs.finalCondp->cloneTreePure(false)));
+                        m_nfa.edges.back().rejectOnFail = true;
+                    }
+                    if (rhs.finalCondp
+                        && !m_nfa.nodes[rhs.termNode].isUnbounded) {
+                        m_nfa.addLink(rhs.termNode, sinkNode,
+                                      sampled(rhs.finalCondp->cloneTreePure(false)));
+                        m_nfa.edges.back().rejectOnFail = true;
+                    }
+                }
+            }
+            return {combNode, nullptr};
         }
         if (VN_IS(nodep, LogAnd)) {
             // Boolean AND: treat as leaf with the whole expr as finalCond
@@ -626,7 +737,8 @@ public:
         std::vector<bool> needsReg(N, false);
         for (const auto& edge : nfa.edges) {
             if (edge.consumesCycle && edge.toId != nfa.acceptNode
-                && edge.toId != nfa.rejectNode) {
+                && edge.toId != nfa.rejectNode
+                && !nfa.nodes[edge.toId].isRejectSink) {
                 needsReg[edge.toId] = true;
             }
         }
@@ -638,8 +750,27 @@ public:
         std::vector<AstVar*> stateVars(N, nullptr);
         std::vector<AstVar*> counterActiveVars(N, nullptr);
         std::vector<AstVar*> counterCountVars(N, nullptr);
+        // SAnd combiner: per-combiner done-latch register pair.
+        std::vector<AstVar*> doneLVars(N, nullptr);
+        std::vector<AstVar*> doneRVars(N, nullptr);
         AstNodeDType* const u32DType = m_modp->findBasicDType(VBasicDTypeKwd::UINT32);
         for (int i = 0; i < N; ++i) {
+            if (nfa.nodes[i].isAndCombiner) {
+                const std::string base = baseName + "__a" + std::to_string(i);
+                AstVar* const lp = new AstVar{flp, VVarType::MODULETEMP,
+                                              base + "_doneL",
+                                              m_modp->findBitDType()};
+                lp->lifetime(VLifetime::STATIC_EXPLICIT);
+                m_modp->addStmtsp(lp);
+                doneLVars[i] = lp;
+                AstVar* const rp = new AstVar{flp, VVarType::MODULETEMP,
+                                              base + "_doneR",
+                                              m_modp->findBitDType()};
+                rp->lifetime(VLifetime::STATIC_EXPLICIT);
+                m_modp->addStmtsp(rp);
+                doneRVars[i] = rp;
+                continue;
+            }
             if (nfa.nodes[i].isCounter) {
                 const std::string base = baseName + "__c" + std::to_string(i);
                 AstVar* const activep = new AstVar{flp, VVarType::MODULETEMP,
@@ -695,12 +826,79 @@ public:
             }
         }
 
-        for (int pass = 0; pass < N; ++pass) {
+        // Helper: build `state && $sampled(cond)` (cond may be null, in which
+        // case returns just the state ref clone). Used by SAnd combiner to
+        // derive per-side "accept this cycle" signals.
+        auto buildAcceptNow
+            = [flp](AstNodeExpr* stateExprp, AstNodeExpr* condp) -> AstNodeExpr* {
+            AstNodeExpr* const statep = stateExprp->cloneTreePure(false);
+            if (!condp) return statep;
+            AstSampled* const sampp
+                = new AstSampled{flp, condp->cloneTreePure(false)};
+            sampp->dtypeSetBit();
+            AstNodeExpr* const andp = new AstAnd{flp, statep, sampp};
+            andp->dtypeSetBit();
+            return andp;
+        };
+
+        for (int pass = 0; pass < 2 * N + 2; ++pass) {
             bool changed = false;
+            // Try to seed any SAnd combiner whose sub-NFAs are now ready.
+            // This must happen inside the Phase 1 fixed-point because the
+            // combiner itself is a Link source (downstream Links and the
+            // accept Link read stateSig[combNode]) and, dually, the
+            // sub-NFA termNodes may themselves be Link-propagated (not
+            // registered), so their stateSigs only become available after
+            // at least one propagation pass.
+            for (int i = 0; i < N; ++i) {
+                const auto& node = nfa.nodes[i];
+                if (!node.isAndCombiner) continue;
+                if (stateSig[i]) continue;
+                const int l = node.andLhsTermId;
+                const int r = node.andRhsTermId;
+                if (l < 0 || r < 0) continue;
+                if (!stateSig[l] || !stateSig[r]) continue;
+
+                AstNodeExpr* const acceptLforOr
+                    = buildAcceptNow(stateSig[l], node.andLhsCondp);
+                AstNodeExpr* const acceptRforOr
+                    = buildAcceptNow(stateSig[r], node.andRhsCondp);
+                AstNodeExpr* const acceptLforOne
+                    = buildAcceptNow(stateSig[l], node.andLhsCondp);
+                AstNodeExpr* const acceptRforOne
+                    = buildAcceptNow(stateSig[r], node.andRhsCondp);
+
+                AstNodeExpr* const doneLRefp
+                    = new AstVarRef{flp, doneLVars[i], VAccess::READ};
+                AstNodeExpr* const doneROrp
+                    = new AstOr{flp, doneLRefp, acceptLforOr};
+                doneROrp->dtypeSetBit();
+                AstNodeExpr* const doneRRefp
+                    = new AstVarRef{flp, doneRVars[i], VAccess::READ};
+                AstNodeExpr* const doneRightOrp
+                    = new AstOr{flp, doneRRefp, acceptRforOr};
+                doneRightOrp->dtypeSetBit();
+                AstNodeExpr* const bothDonep
+                    = new AstAnd{flp, doneROrp, doneRightOrp};
+                bothDonep->dtypeSetBit();
+                AstNodeExpr* const oneNowp
+                    = new AstOr{flp, acceptLforOne, acceptRforOne};
+                oneNowp->dtypeSetBit();
+                AstNodeExpr* const acceptp
+                    = new AstAnd{flp, bothDonep, oneNowp};
+                acceptp->dtypeSetBit();
+                stateSig[i] = acceptp;
+                changed = true;
+            }
+
             for (const auto& edge : nfa.edges) {
                 if (edge.consumesCycle) continue;
                 if (!stateSig[edge.fromId]) continue;
                 if (nfa.nodes[edge.toId].isAccept || nfa.nodes[edge.toId].isReject) continue;
+                // Reject sinks exist only as Phase 3a rejectOnFail targets;
+                // they have no "active" semantics and must not appear in
+                // stateSig propagation.
+                if (nfa.nodes[edge.toId].isRejectSink) continue;
 
                 AstNodeExpr* const srcSig = stateSig[edge.fromId]->cloneTreePure(false);
                 AstNodeExpr* const contribution = andCond(flp, srcSig, edge.condp);
@@ -865,6 +1063,71 @@ public:
             m_modp->addStmtsp(counterAlwaysp);
         }
 
+        // Phase 2c: SAnd combiner done-latch always block.
+        // For each combiner i, emit:
+        //   always @(senTree) begin
+        //     if (stateSig[i])               // accept fires this cycle
+        //       begin doneL <= 0; doneR <= 0; end
+        //     else begin
+        //       if (acceptLNow && !disable) doneL <= 1;
+        //       if (acceptRNow && !disable) doneR <= 1;
+        //     end
+        //   end
+        // NBA semantics ensure the read of doneL/doneR inside stateSig[i]
+        // uses pre-update values, matching IEEE 16.9.5 end-time semantics.
+        for (int ai = 0; ai < N; ++ai) {
+            if (!doneLVars[ai]) continue;
+            const auto& node = nfa.nodes[ai];
+            const int l = node.andLhsTermId;
+            const int r = node.andRhsTermId;
+            if (!stateSig[l] || !stateSig[r] || !stateSig[ai]) continue;
+
+            AstAssignDly* const clearLp = new AstAssignDly{flp,
+                new AstVarRef{flp, doneLVars[ai], VAccess::WRITE},
+                new AstConst{flp, AstConst::BitFalse{}}};
+            AstAssignDly* const clearRp = new AstAssignDly{flp,
+                new AstVarRef{flp, doneRVars[ai], VAccess::WRITE},
+                new AstConst{flp, AstConst::BitFalse{}}};
+            clearLp->addNext(clearRp);
+
+            AstNodeExpr* const acceptLNowp
+                = buildAcceptNow(stateSig[l], node.andLhsCondp);
+            AstNodeExpr* const acceptRNowp
+                = buildAcceptNow(stateSig[r], node.andRhsCondp);
+            AstNodeExpr* gateLp = acceptLNowp;
+            AstNodeExpr* gateRp = acceptRNowp;
+            if (disableExprp) {
+                AstNodeExpr* const notDisL
+                    = new AstNot{flp, disableExprp->cloneTreePure(false)};
+                notDisL->dtypeSetBit();
+                gateLp = new AstAnd{flp, gateLp, notDisL};
+                gateLp->dtypeSetBit();
+                AstNodeExpr* const notDisR
+                    = new AstNot{flp, disableExprp->cloneTreePure(false)};
+                notDisR->dtypeSetBit();
+                gateRp = new AstAnd{flp, gateRp, notDisR};
+                gateRp->dtypeSetBit();
+            }
+            AstAssignDly* const setLp = new AstAssignDly{flp,
+                new AstVarRef{flp, doneLVars[ai], VAccess::WRITE},
+                new AstConst{flp, AstConst::BitTrue{}}};
+            AstIf* const setLIfp
+                = new AstIf{flp, gateLp, setLp, nullptr};
+            AstAssignDly* const setRp = new AstAssignDly{flp,
+                new AstVarRef{flp, doneRVars[ai], VAccess::WRITE},
+                new AstConst{flp, AstConst::BitTrue{}}};
+            AstIf* const setRIfp
+                = new AstIf{flp, gateRp, setRp, nullptr};
+            setLIfp->addNext(setRIfp);
+
+            AstIf* const topp = new AstIf{flp,
+                stateSig[ai]->cloneTreePure(false),
+                clearLp, setLIfp};
+            AstAlways* const combAlwaysp = new AstAlways{flp,
+                VAlwaysKwd::ALWAYS, senTreep->cloneTree(false), topp};
+            m_modp->addStmtsp(combAlwaysp);
+        }
+
         // Phase 3: Compute accept/reject from Links to accept node + acceptCondp
         // The accept node receives Links from terminal NFA nodes.
         // acceptCondp is the final boolean check from the builder.
@@ -901,9 +1164,14 @@ public:
                     = new AstAnd{flp, srcSig, atEndp};
                 expireContribp->dtypeSetBit();
                 rejectBasep = orExprs(flp, rejectBasep, expireContribp);
-            } else if (nfa.nodes[edge.fromId].isUnbounded) {
-                // Liveness terminal: contributes to accept/cover only.
-                // Reject never fires (IEEE weak semantics).
+            } else if (nfa.nodes[edge.fromId].isUnbounded
+                       || nfa.nodes[edge.fromId].isAndCombiner) {
+                // Liveness terminal OR SAnd combiner: contributes to
+                // accept/cover only. A combiner's stateSig is a richer
+                // expression (the done-latch formula) that is TRUE only on
+                // the exact cycle the aggregated sequence matches, so
+                // treating "formula false" as reject would be wrong -- the
+                // constituent sub-NFAs already emit their own rejects.
                 terminalActivep
                     = orExprs(flp, terminalActivep, srcSig);
             } else {
@@ -964,6 +1232,11 @@ public:
         for (int i = 0; i < N; ++i) {
             const auto& conds = nfa.nodes[i].throughoutConds;
             if (conds.empty()) continue;
+            // Skip SAnd combiner: its stateSig is an accept formula
+            // (fires only at completion), not an in-progress marker, so
+            // throughout-drop detection for the AND itself is already
+            // covered by the sub-sequences' own combiner-internal nodes.
+            if (nfa.nodes[i].isAndCombiner) continue;
             AstNodeExpr* stateExprp = nullptr;
             if (stateVars[i]) {
                 stateExprp = new AstVarRef{flp, stateVars[i], VAccess::READ};
