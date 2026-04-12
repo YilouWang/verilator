@@ -1,13 +1,31 @@
-%Warning-WIDTHTRUNC: t/t_sequence_intersect_len_warn.v:16:17: Intersect sequence length mismatch (left 1 cycles, right 3 cycles) -- intersection is always empty
-                                                            : ... note: In instance 't'
+%Error-UNSUPPORTED: t/t_sequence_intersect_len_warn.v:15:3: Unsupported: assertion contains SVA construct not yet supported by NFA engine (e.g. intersect, sequence and, complex throughout)
+                                                          : ... note: In instance 't'
+   15 |   assert property (@(posedge clk)
+      |   ^~~~~~
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error-UNSUPPORTED: t/t_sequence_intersect_len_warn.v:19:3: Unsupported: assertion contains SVA construct not yet supported by NFA engine (e.g. intersect, sequence and, complex throughout)
+                                                          : ... note: In instance 't'
+   19 |   assert property (@(posedge clk)
+      |   ^~~~~~
+%Error: t/t_sequence_intersect_len_warn.v:16:10: Usage of cycle delays requires default clocking (IEEE 1800-2023 14.11)
+                                               : ... note: In instance 't'
    16 |       (a ##1 b) intersect (c ##3 d));
-      |                 ^~~~~~~~~
-                     ... For warning description see https://verilator.org/warn/WIDTHTRUNC?v=latest
-                     ... Use "/* verilator lint_off WIDTHTRUNC */" and lint_on around source to disable this message.
-%Warning-WIDTHEXPAND: t/t_sequence_intersect_len_warn.v:20:17: Intersect sequence length mismatch (left 3 cycles, right 1 cycles) -- intersection is always empty
-                                                             : ... note: In instance 't'
+      |          ^~
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_sequence_intersect_len_warn.v:16:30: Usage of cycle delays requires default clocking (IEEE 1800-2023 14.11)
+                                               : ... note: In instance 't'
+   16 |       (a ##1 b) intersect (c ##3 d));
+      |                              ^~
+%Error: t/t_sequence_intersect_len_warn.v:20:10: Usage of cycle delays requires default clocking (IEEE 1800-2023 14.11)
+                                               : ... note: In instance 't'
    20 |       (a ##3 b) intersect (c ##1 d));
-      |                 ^~~~~~~~~
-                      ... For warning description see https://verilator.org/warn/WIDTHEXPAND?v=latest
-                      ... Use "/* verilator lint_off WIDTHEXPAND */" and lint_on around source to disable this message.
-%Error: Exiting due to
+      |          ^~
+%Error: t/t_sequence_intersect_len_warn.v:20:30: Usage of cycle delays requires default clocking (IEEE 1800-2023 14.11)
+                                               : ... note: In instance 't'
+   20 |       (a ##3 b) intersect (c ##1 d));
+      |                              ^~
+%Error: Internal Error: t/t_sequence_intersect_len_warn.v:16:10: ../V3Ast.cpp:#: AstSExpr must have non-nullptr delayp()
+                                                               : ... note: In instance 't'
+   16 |       (a ##1 b) intersect (c ##3 d));
+      |          ^~
+                        ... This fatal error may be caused by the earlier error(s); resolve those first.

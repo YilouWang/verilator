@@ -338,7 +338,8 @@ class SvaNfaBuilder final {
         // Handle LHS (preExpr)
         int currentNode = entryNode;
         if (AstNodeExpr* const preExprp = sexprp->preExprp()) {
-            const BuildResult pre = buildExpr(preExprp, currentNode);
+            const BuildResult pre = buildExpr(preExprp, currentNode,
+                                              isTopLevelStep);
             if (!pre.valid()) return BuildResult::fail();
             // If pre has a final condition, add it as a conditioned Link
             if (pre.finalCondp) {
@@ -473,11 +474,21 @@ class SvaNfaBuilder final {
         return {currentNode, exprp, std::move(rangeMidSources)};
     }
 
-    BuildResult buildConsRep(AstConsRep* repp, int entryNode) {
+    BuildResult buildConsRep(AstConsRep* repp, int entryNode,
+                             bool isTopLevelStep = false) {
         FileLine* const flp = repp->fileline();
         AstNodeExpr* const exprp = repp->exprp();
         const int minN = getConstInt(repp->countp());
         if (minN < 0) return BuildResult::fail();
+        // Guard against excessively large exact repetitions that would
+        // create O(N) nodes and O(N^2) Phase 1 fixed-point iterations.
+        // A counter-based FSM for ConsRep is a future enhancement
+        // (unlike range delay counters, ConsRep counters need "expr must
+        // hold every cycle" semantics). For now, bail on large N.
+        constexpr int kConsRepLimit = 256;
+        if (minN > kConsRepLimit && !repp->unbounded() && !repp->maxCountp()) {
+            return BuildResult::fail();
+        }
 
         int currentNode = entryNode;
         for (int i = 0; i < minN; ++i) {
@@ -486,10 +497,20 @@ class SvaNfaBuilder final {
                 guardedEdge(currentNode, nextNode, flp);
                 currentNode = nextNode;
             }
-            // Add bool check as conditioned Link
+            // Add bool check as conditioned Link.
+            // Mark first and last boolean Links as rejectOnFail so that
+            // standalone ConsRep (no implication wrapper) generates correct
+            // reject signals:
+            //   first Link: "expr false at start → immediate fail"
+            //   last Link:  "partial match, expr false at final step → fail"
+            // For ConsRep inside an implication antecedent, the rejects are
+            // harmless (they fire in addition to the consequent reject).
             const int condNode = scopedCreateNode();
             guardedLink(currentNode, condNode,
                         sampled(exprp->cloneTreePure(false)), flp);
+            if (isTopLevelStep && (i == 0 || i == minN - 1)) {
+                m_nfa.edges.back().rejectOnFail = true;
+            }
             currentNode = condNode;
         }
 
@@ -674,6 +695,18 @@ public:
     explicit SvaNfaBuilder(SvaNfa& nfa)
         : m_nfa{nfa} {}
 
+    // Reset builder scope between antecedent and consequent builds so that
+    // liveness from the antecedent (e.g. `a[+]`, `a[->N]`) does not leak
+    // into the consequent. Consequent nodes must start with a clean scope
+    // because "reaching the antecedent terminal" is a definitive event --
+    // the consequent MUST be checked (not deferred by liveness).
+    void resetScope() {
+        m_inUnboundedScope = false;
+        // throughout stack should already be empty between top-level builds,
+        // but clear it defensively.
+        m_throughoutStack.clear();
+    }
+
     // Build NFA for any expression node. Returns {termNode, finalCond}.
     // isTopLevelStep: see buildSExpr -- only the outermost call from
     // processAssertion / build() should pass true. Recursive calls into
@@ -684,7 +717,7 @@ public:
             return buildSExpr(sexprp, entryNode, isTopLevelStep);
         }
         if (AstConsRep* const repp = VN_CAST(nodep, ConsRep)) {
-            return buildConsRep(repp, entryNode);
+            return buildConsRep(repp, entryNode, isTopLevelStep);
         }
         if (AstSGotoRep* const repp = VN_CAST(nodep, SGotoRep)) {
             return buildGotoRep(repp, entryNode);
@@ -1499,17 +1532,44 @@ class AssertNfaVisitor final : public VNVisitor {
         if (parts.hasImplication) {
             nfa.startNode = nfa.createNode();
 
+            // Build antecedent. For simple boolean triggers this produces
+            // {startNode, boolExpr} (no NFA nodes added). For multi-cycle
+            // antecedents (ConsRep, SExpr, SGotoRep, ...) it builds a real
+            // NFA sub-graph whose terminal is the "match" point.
+            const BuildResult antResult
+                = builder.buildExpr(parts.triggerExprp, nfa.startNode);
+            if (!antResult.valid()) {
+                assertp->v3warn(E_UNSUPPORTED,
+                                "Unsupported: assertion antecedent contains SVA"
+                                " construct not yet supported by NFA engine");
+                return;
+            }
+
+            // Create a clean trigger node that does NOT inherit the
+            // antecedent's liveness scope. Reaching the antecedent
+            // terminal is a definitive event -- the consequent MUST
+            // fire accept/reject, even if the antecedent was unbounded.
+            // Use raw nfa.createNode() (not builder's scopedCreateNode)
+            // so the node starts with isUnbounded=false.
+            const int trigNode = nfa.createNode();
+            if (antResult.finalCondp) {
+                nfa.addLink(antResult.termNode, trigNode,
+                            new AstSampled{flp,
+                                           antResult.finalCondp->cloneTreePure(false)});
+            } else {
+                nfa.addLink(antResult.termNode, trigNode);
+            }
+
+            // Reset builder scope: clear liveness and throughout state
+            // from the antecedent build so the consequent gets a fresh
+            // context. A `[+]` antecedent must not make consequent nodes
+            // liveness-only.
+            builder.resetScope();
+
             if (parts.isOverlapped) {
-                const int trigNode = nfa.createNode();
-                // Sampled antecedent
-                nfa.addLink(nfa.startNode, trigNode,
-                            new AstSampled{flp, parts.triggerExprp->cloneTreePure(false)});
                 result = builder.buildExpr(parts.seqExprp, trigNode,
                                            /*isTopLevelStep=*/true);
             } else {
-                const int trigNode = nfa.createNode();
-                nfa.addLink(nfa.startNode, trigNode,
-                            new AstSampled{flp, parts.triggerExprp->cloneTreePure(false)});
                 const int delayNode = nfa.createNode();
                 nfa.addClockEdge(trigNode, delayNode);
                 result = builder.buildExpr(parts.seqExprp, delayNode,

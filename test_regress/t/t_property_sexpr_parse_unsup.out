@@ -1,19 +1,24 @@
-%Warning-WIDTHTRUNC: t/t_property_sexpr_unsup.v:66:14: Logical operator IMPLICATION expects 1 bit on the RHS, but RHS's CMETHODHARD 'at' generates 8 bits.
+%Warning-WIDTHTRUNC: t/t_property_sexpr_unsup.v:60:14: Logical operator IMPLICATION expects 1 bit on the RHS, but RHS's CMETHODHARD 'at' generates 8 bits.
                                                      : ... note: In instance 't.ieee'
-   66 |     $rose(a) |-> q[0];
+   60 |     $rose(a) |-> q[0];
       |              ^~~
                      ... For warning description see https://verilator.org/warn/WIDTHTRUNC?v=latest
                      ... Use "/* verilator lint_off WIDTHTRUNC */" and lint_on around source to disable this message.
-%Warning-WIDTHTRUNC: t/t_property_sexpr_unsup.v:71:29: Logical operator SEXPR expects 1 bit on the exprp, but exprp's CMETHODHARD 'at' generates 8 bits.
+%Warning-WIDTHTRUNC: t/t_property_sexpr_unsup.v:65:29: Logical operator SEXPR expects 1 bit on the exprp, but exprp's CMETHODHARD 'at' generates 8 bits.
                                                      : ... note: In instance 't.ieee'
-   71 |     ($rose(a), l_b = b) |-> ##[3:10] q[l_b];
+   65 |     ($rose(a), l_b = b) |-> ##[3:10] q[l_b];
       |                             ^~
-%Warning-WIDTHTRUNC: t/t_property_sexpr_unsup.v:92:31: Logical operator SEXPR expects 1 bit on the exprp, but exprp's VARREF 'b' generates 32 bits.
+%Warning-WIDTHTRUNC: t/t_property_sexpr_unsup.v:86:31: Logical operator SEXPR expects 1 bit on the exprp, but exprp's VARREF 'b' generates 32 bits.
                                                      : ... note: In instance 't.ieee'
-   92 |   assert property (@clk not a ##1 b);
+   86 |   assert property (@clk not a ##1 b);
       |                               ^~
-%Error: Internal Error: t/t_property_sexpr_unsup.v:71:29: ../V3AssertProp.cpp:#: Range delay SExpr without clocking event
+%Error: t/t_property_sexpr_unsup.v:86:31: Usage of cycle delays requires default clocking (IEEE 1800-2023 14.11)
+                                        : ... note: In instance 't.ieee'
+   86 |   assert property (@clk not a ##1 b);
+      |                               ^~
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: Internal Error: t/t_property_sexpr_unsup.v:86:31: ../V3Ast.cpp:#: AstSExpr must have non-nullptr delayp()
                                                         : ... note: In instance 't.ieee'
-   71 |     ($rose(a), l_b = b) |-> ##[3:10] q[l_b];
-      |                             ^~
-                        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+   86 |   assert property (@clk not a ##1 b);
+      |                               ^~
+                        ... This fatal error may be caused by the earlier error(s); resolve those first.

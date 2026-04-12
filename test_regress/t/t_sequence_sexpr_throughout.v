@@ -46,6 +46,19 @@ module t (
       a |-> (cond throughout b))
     else count_fail3 <= count_fail3 + 1;
 
+  // Test 4: throughout with range delay on RHS (IEEE 16.9.9)
+  // Compile + run check only (constant-true sub-expr, never fires else).
+  assert property (@(posedge clk) disable iff (cyc < 10)
+      a |-> (1'b1 throughout (1'b1 ##[1:2] 1'b1)));
+
+  // Test 5: throughout with temporal 'and' on RHS
+  assert property (@(posedge clk) disable iff (cyc < 10)
+      a |-> (1'b1 throughout ((1'b1 ##1 1'b1) and (1'b1 ##1 1'b1))));
+
+  // Test 6: nested throughout
+  assert property (@(posedge clk) disable iff (cyc < 10)
+      a |-> (1'b1 throughout (1'b1 throughout (1'b1 ##1 1'b1))));
+
   always_ff @(posedge clk) begin
 `ifdef TEST_VERBOSE
     $write("[%0t] cyc==%0d crc=%x cond=%b a=%b b=%b\n",
