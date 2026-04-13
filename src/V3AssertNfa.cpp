@@ -497,8 +497,8 @@ class SvaNfaBuilder final {
             // Mark first and last boolean Links as rejectOnFail so that
             // standalone ConsRep (no implication wrapper) generates correct
             // reject signals:
-            //   first Link: "expr false at start → immediate fail"
-            //   last Link:  "partial match, expr false at final step → fail"
+            //   first Link: "expr false at start -> immediate fail"
+            //   last Link:  "partial match, expr false at final step -> fail"
             // For ConsRep inside an implication antecedent, the rejects are
             // harmless (they fire in addition to the consequent reject).
             const int condNode = scopedCreateNode();
@@ -1016,7 +1016,7 @@ public:
             if (!changed) break;
         }
 
-        // Phase 2: Compute Edge activations → NBA
+        // Phase 2: Compute Edge activations -> NBA
         AstNode* bodyp = nullptr;
         for (int i = 0; i < N; ++i) {
             if (!stateVars[i]) continue;
@@ -1759,12 +1759,15 @@ class AssertNfaVisitor final : public VNVisitor {
             if (propSpecp && propSpecp->disablep()) {
                 AstNodeExpr* const oldDisp = propSpecp->disablep();
                 oldDisp->unlinkFrBack();
-                // Keep disableExprp pointing to the original expression (now
-                // unlinked); it is used by emit() as a template to clone from
-                // for other gates (Phase 2b, 2c, 3a, 3b). The caller (emit)
-                // will deleteTree() it.
+                // disableExprp now points to the unlinked expression. It is
+                // used via cloneTreePure() in emit(). The original must be
+                // deleted explicitly after emit() returns (see below).
             }
         }
+        // Track whether disableExprp was unlinked so we can delete it later.
+        // Nodes that remain in the AST are freed when the property tree is
+        // deleted; unlinked nodes must be freed manually.
+        const bool disableExprUnlinked = disableCntVarp && disableExprp;
 
         // Build NFA
         SvaNfa nfa;
@@ -1782,6 +1785,7 @@ class AssertNfaVisitor final : public VNVisitor {
             if (!antResult.valid()) {
                 assertp->v3warn(E_UNSUPPORTED, "Unsupported: assertion antecedent contains SVA"
                                                " construct not yet supported by NFA engine");
+                if (disableExprUnlinked) disableExprp->deleteTree();
                 return;
             }
 
@@ -1795,6 +1799,9 @@ class AssertNfaVisitor final : public VNVisitor {
             if (antResult.finalCondp) {
                 nfa.addLink(antResult.termNode, trigNode,
                             new AstSampled{flp, antResult.finalCondp->cloneTreePure(false)});
+                // Delete fresh finalCondp (no AST parent = freshly allocated).
+                // Nodes in the original tree are freed with innerPropp later.
+                if (!antResult.finalCondp->backp()) antResult.finalCondp->deleteTree();
             } else {
                 nfa.addLink(antResult.termNode, trigNode);
             }
@@ -1847,6 +1854,7 @@ class AssertNfaVisitor final : public VNVisitor {
                             "Unsupported: assertion contains SVA construct not yet"
                             " supported by NFA engine (e.g. intersect, sequence and,"
                             " complex throughout)");
+            if (disableExprUnlinked) disableExprp->deleteTree();
             return;
         }
 
@@ -1869,6 +1877,15 @@ class AssertNfaVisitor final : public VNVisitor {
         // Clean up locally-owned temporaries (emit cloned them)
         alwaysTriggerp->deleteTree();
         if (senTreeOwned) senTreep->deleteTree();
+        // Delete unlinked disableExprp (was unlinked from propSpecp for the
+        // disableCnt mechanism; emit() only uses clones, so original is ours).
+        if (disableExprUnlinked) disableExprp->deleteTree();
+        // Delete fresh finalCondp nodes not attached to the original AST.
+        // emit() always cloneTreePure()s finalCondp, so we own any freshly
+        // allocated node (backp()==nullptr means it has no AST parent).
+        if (result.finalCondp && !result.finalCondp->backp()) {
+            result.finalCondp->deleteTree();
+        }
 
         // Gate pass handler with accept signal to avoid vacuous-pass
         // firings on non-terminal cycles (standalone sequences only).

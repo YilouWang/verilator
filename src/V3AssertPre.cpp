@@ -1228,17 +1228,6 @@ private:
         m_pexprp = nodep;
 
         if (m_disablep) {
-            const AstSampled* sampledp;
-            if (m_disablep->exists([&sampledp](const AstSampled* const sp) {
-                    sampledp = sp;
-                    return true;
-                })) {
-                sampledp->v3warn(E_UNSUPPORTED,
-                                 "Unsupported: $sampled inside disabled condition of a sequence");
-                m_disablep = new AstConst{m_disablep->fileline(), AstConst::BitFalse{}};
-                // always a copy is used, so remove it now
-                pushDeletep(m_disablep);
-            }
             FileLine* const flp = nodep->fileline();
             // Add counter which counts times the condition turned true
             AstVar* const disableCntp

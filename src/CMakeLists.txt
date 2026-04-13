@@ -42,6 +42,7 @@ set(HEADERS
     V3Active.h
     V3ActiveTop.h
     V3Assert.h
+    V3AssertNfa.h
     V3AssertPre.h
     V3AssertProp.h
     V3Ast.h
@@ -213,6 +214,7 @@ set(COMMON_SOURCES
     V3Active.cpp
     V3ActiveTop.cpp
     V3Assert.cpp
+    V3AssertNfa.cpp
     V3AssertPre.cpp
     V3AssertProp.cpp
     V3Ast.cpp
