@@ -27,6 +27,7 @@
 #include "V3PchAstNoMT.h"
 
 #include "V3AssertNfa.h"
+
 #include "V3Const.h"
 #include "V3Task.h"
 #include "V3UniqueNames.h"
@@ -262,9 +263,8 @@ class SvaNfaBuilder final {
         if (AstSThroughout* const throughp = VN_CAST(nodep, SThroughout)) {
             return fixedLength(throughp->rhsp());
         }
-        if (VN_IS(nodep, ConsRep) || VN_IS(nodep, SGotoRep)
-            || VN_IS(nodep, SAnd) || VN_IS(nodep, SOr)
-            || VN_IS(nodep, SIntersect)) {
+        if (VN_IS(nodep, ConsRep) || VN_IS(nodep, SGotoRep) || VN_IS(nodep, SAnd)
+            || VN_IS(nodep, SOr) || VN_IS(nodep, SIntersect)) {
             // Conservatively variable -- can be tightened in a follow-up.
             return -1;
         }
@@ -329,8 +329,7 @@ class SvaNfaBuilder final {
     // (the preExpr Link) is marked as rejectOnFail so that "trigger
     // fires, first boolean fails" fires a reject even though the attempt
     // never leaves the start state.
-    BuildResult buildSExpr(AstSExpr* sexprp, int entryNode,
-                           bool isTopLevelStep = false) {
+    BuildResult buildSExpr(AstSExpr* sexprp, int entryNode, bool isTopLevelStep = false) {
         AstDelay* const delayp = VN_CAST(sexprp->delayp(), Delay);
         if (!delayp || !delayp->isCycleDelay()) return BuildResult::fail();
 
@@ -339,16 +338,14 @@ class SvaNfaBuilder final {
         // Handle LHS (preExpr)
         int currentNode = entryNode;
         if (AstNodeExpr* const preExprp = sexprp->preExprp()) {
-            const BuildResult pre = buildExpr(preExprp, currentNode,
-                                              isTopLevelStep);
+            const BuildResult pre = buildExpr(preExprp, currentNode, isTopLevelStep);
             if (!pre.valid()) return BuildResult::fail();
             // If pre has a final condition, add it as a conditioned Link
             if (pre.finalCondp) {
                 const int condNode = scopedCreateNode();
-                guardedLink(pre.termNode, condNode,
-                            sampled(pre.finalCondp->cloneTreePure(false)), flp);
-                if (isTopLevelStep
-                    && !m_nfa.nodes[pre.termNode].isUnbounded
+                guardedLink(pre.termNode, condNode, sampled(pre.finalCondp->cloneTreePure(false)),
+                            flp);
+                if (isTopLevelStep && !m_nfa.nodes[pre.termNode].isUnbounded
                     && !m_inUnboundedScope) {
                     // Mark Link as rejectOnFail: trigger fires AND this
                     // required boolean is false -> immediate reject. Must
@@ -437,13 +434,11 @@ class SvaNfaBuilder final {
                         rangeMidSources.push_back(currentNode);  // P_M
                         for (int i = 0; i < range; ++i) {
                             const int nextNode = scopedCreateNode();
-                            AstNodeExpr* const notExprp = new AstNot{flp,
-                                sampled(exprp->cloneTreePure(false))};
+                            AstNodeExpr* const notExprp
+                                = new AstNot{flp, sampled(exprp->cloneTreePure(false))};
                             notExprp->dtypeSetBit();
                             guardedEdge(currentNode, nextNode, notExprp, flp);
-                            if (i < range - 1) {
-                                rangeMidSources.push_back(nextNode);
-                            }
+                            if (i < range - 1) { rangeMidSources.push_back(nextNode); }
                             currentNode = nextNode;
                         }
                         // currentNode = last position = P_N, the reject
@@ -464,9 +459,8 @@ class SvaNfaBuilder final {
         // would try to use the multi-cycle subtree as a sampled boolean,
         // which produces invalid AST and silently broken assertions.
         AstNodeExpr* const exprp = sexprp->exprp();
-        if (VN_IS(exprp, SExpr) || VN_IS(exprp, SAnd) || VN_IS(exprp, SOr)
-            || VN_IS(exprp, ConsRep) || VN_IS(exprp, SGotoRep)
-            || VN_IS(exprp, SThroughout) || VN_IS(exprp, SIntersect)) {
+        if (VN_IS(exprp, SExpr) || VN_IS(exprp, SAnd) || VN_IS(exprp, SOr) || VN_IS(exprp, ConsRep)
+            || VN_IS(exprp, SGotoRep) || VN_IS(exprp, SThroughout) || VN_IS(exprp, SIntersect)) {
             // rangeMidSources should be empty here because the chain path
             // is only taken for pure-boolean RHS.
             return buildExpr(exprp, currentNode);
@@ -475,8 +469,7 @@ class SvaNfaBuilder final {
         return {currentNode, exprp, std::move(rangeMidSources)};
     }
 
-    BuildResult buildConsRep(AstConsRep* repp, int entryNode,
-                             bool isTopLevelStep = false) {
+    BuildResult buildConsRep(AstConsRep* repp, int entryNode, bool isTopLevelStep = false) {
         FileLine* const flp = repp->fileline();
         AstNodeExpr* const exprp = repp->exprp();
         const int minN = getConstInt(repp->countp());
@@ -507,8 +500,7 @@ class SvaNfaBuilder final {
             // For ConsRep inside an implication antecedent, the rejects are
             // harmless (they fire in addition to the consequent reject).
             const int condNode = scopedCreateNode();
-            guardedLink(currentNode, condNode,
-                        sampled(exprp->cloneTreePure(false)), flp);
+            guardedLink(currentNode, condNode, sampled(exprp->cloneTreePure(false)), flp);
             if (isTopLevelStep && (i == 0 || i == minN - 1)) {
                 m_nfa.edges.back().rejectOnFail = true;
             }
@@ -520,8 +512,7 @@ class SvaNfaBuilder final {
                 const int waitNode = scopedCreateNode();
                 guardedEdge(currentNode, waitNode, flp);
                 const int checkNode = scopedCreateNode();
-                guardedLink(waitNode, checkNode,
-                            sampled(exprp->cloneTreePure(false)), flp);
+                guardedLink(waitNode, checkNode, sampled(exprp->cloneTreePure(false)), flp);
                 guardedEdge(checkNode, waitNode, flp);
                 guardedLink(currentNode, checkNode, flp);
                 currentNode = checkNode;
@@ -529,8 +520,7 @@ class SvaNfaBuilder final {
                 const int loopBackNode = scopedCreateNode();
                 guardedEdge(currentNode, loopBackNode, flp);
                 const int reCheckNode = scopedCreateNode();
-                guardedLink(loopBackNode, reCheckNode,
-                            sampled(exprp->cloneTreePure(false)), flp);
+                guardedLink(loopBackNode, reCheckNode, sampled(exprp->cloneTreePure(false)), flp);
                 guardedEdge(reCheckNode, loopBackNode, flp);
                 guardedLink(reCheckNode, currentNode, flp);
             }
@@ -547,8 +537,7 @@ class SvaNfaBuilder final {
                 const int nextNode = scopedCreateNode();
                 guardedEdge(currentNode, nextNode, flp);
                 const int checkNode = scopedCreateNode();
-                guardedLink(nextNode, checkNode,
-                            sampled(exprp->cloneTreePure(false)), flp);
+                guardedLink(nextNode, checkNode, sampled(exprp->cloneTreePure(false)), flp);
                 guardedLink(checkNode, mergeNode, flp);
                 currentNode = checkNode;
             }
@@ -575,13 +564,11 @@ class SvaNfaBuilder final {
             // Phase 2 because waitNode is registered (self-loop Edge),
             // so the goto rep NFA never activated.
             guardedEdge(currentNode, waitNode, flp);
-            AstNodeExpr* const notExprp
-                = new AstNot{flp, exprp->cloneTreePure(false)};
+            AstNodeExpr* const notExprp = new AstNot{flp, exprp->cloneTreePure(false)};
             notExprp->dtypeSetBit();
             guardedEdge(waitNode, waitNode, sampled(notExprp), flp);
             const int matchNode = scopedCreateNode();
-            guardedLink(waitNode, matchNode,
-                        sampled(exprp->cloneTreePure(false)), flp);
+            guardedLink(waitNode, matchNode, sampled(exprp->cloneTreePure(false)), flp);
             currentNode = matchNode;
         }
         // `[->N]` waits unboundedly for each match -- liveness terminal.
@@ -593,8 +580,8 @@ class SvaNfaBuilder final {
     // Shared sub-routine for SAnd and (lowered) SIntersect: build two
     // disjoint sub-NFAs from the same entry node and aggregate via a
     // done-latch combiner. See spec 3.6 for the done-latch pattern.
-    BuildResult buildAndCombiner(AstNodeExpr* lhsExpr, AstNodeExpr* rhsExpr,
-                                 int entryNode, FileLine* flp) {
+    BuildResult buildAndCombiner(AstNodeExpr* lhsExpr, AstNodeExpr* rhsExpr, int entryNode,
+                                 FileLine* flp) {
         // Snapshot-restore m_inUnboundedScope around each sub-build so an
         // LHS liveness wait does not spuriously mark RHS nodes as unbounded
         // (and vice versa). The combiner inherits liveness only if at
@@ -628,24 +615,17 @@ class SvaNfaBuilder final {
         // Range-delay mid-window sources in either sub-branch would need
         // to be folded into the latch's "accept-now" signal, which the
         // current combiner does not support. Defer (UNSUPPORTED).
-        if (!lhs.midSources.empty() || !rhs.midSources.empty()) {
-            return BuildResult::fail();
-        }
+        if (!lhs.midSources.empty() || !rhs.midSources.empty()) { return BuildResult::fail(); }
         const int combNode = scopedCreateNode();
         SvaNfaNode& cn = m_nfa.nodes[combNode];
         cn.isAndCombiner = true;
         cn.andLhsTermId = lhs.termNode;
         cn.andRhsTermId = rhs.termNode;
-        if (lhs.finalCondp) {
-            cn.andLhsCondp = lhs.finalCondp->cloneTreePure(false);
-        }
-        if (rhs.finalCondp) {
-            cn.andRhsCondp = rhs.finalCondp->cloneTreePure(false);
-        }
+        if (lhs.finalCondp) { cn.andLhsCondp = lhs.finalCondp->cloneTreePure(false); }
+        if (rhs.finalCondp) { cn.andRhsCondp = rhs.finalCondp->cloneTreePure(false); }
         // Liveness propagates: if either sub-sequence is liveness-only
         // (unbounded wait), the whole AND is liveness-only too.
-        if (m_nfa.nodes[lhs.termNode].isUnbounded
-            || m_nfa.nodes[rhs.termNode].isUnbounded) {
+        if (m_nfa.nodes[lhs.termNode].isUnbounded || m_nfa.nodes[rhs.termNode].isUnbounded) {
             cn.isUnbounded = true;
         }
         // Wire sub-sequence terminal-boolean rejects so each side can
@@ -670,25 +650,21 @@ class SvaNfaBuilder final {
             bool needSink = false;
             const bool lhsMultiCycle = (lhs.termNode != entryNode);
             const bool rhsMultiCycle = (rhs.termNode != entryNode);
-            if (lhs.finalCondp && lhsMultiCycle
-                && !m_nfa.nodes[lhs.termNode].isUnbounded) {
+            if (lhs.finalCondp && lhsMultiCycle && !m_nfa.nodes[lhs.termNode].isUnbounded) {
                 needSink = true;
             }
-            if (rhs.finalCondp && rhsMultiCycle
-                && !m_nfa.nodes[rhs.termNode].isUnbounded) {
+            if (rhs.finalCondp && rhsMultiCycle && !m_nfa.nodes[rhs.termNode].isUnbounded) {
                 needSink = true;
             }
             if (needSink) {
                 const int sinkNode = m_nfa.createNode();
                 m_nfa.nodes[sinkNode].isRejectSink = true;
-                if (lhs.finalCondp && lhsMultiCycle
-                    && !m_nfa.nodes[lhs.termNode].isUnbounded) {
+                if (lhs.finalCondp && lhsMultiCycle && !m_nfa.nodes[lhs.termNode].isUnbounded) {
                     m_nfa.addLink(lhs.termNode, sinkNode,
                                   sampled(lhs.finalCondp->cloneTreePure(false)));
                     m_nfa.edges.back().rejectOnFail = true;
                 }
-                if (rhs.finalCondp && rhsMultiCycle
-                    && !m_nfa.nodes[rhs.termNode].isUnbounded) {
+                if (rhs.finalCondp && rhsMultiCycle && !m_nfa.nodes[rhs.termNode].isUnbounded) {
                     m_nfa.addLink(rhs.termNode, sinkNode,
                                   sampled(rhs.finalCondp->cloneTreePure(false)));
                     m_nfa.edges.back().rejectOnFail = true;
@@ -703,8 +679,7 @@ class SvaNfaBuilder final {
         // (e.g. the antecedent trigNode for `a |-> (cond throughout seq)`).
         // Mark it with the guard so that "cond is false at tick 0 when the
         // antecedent fires" is detected as a throughout-drop reject.
-        m_nfa.nodes[entryNode].throughoutConds.push_back(
-            nodep->lhsp()->cloneTreePure(false));
+        m_nfa.nodes[entryNode].throughoutConds.push_back(nodep->lhsp()->cloneTreePure(false));
 
         // Push the guard onto the throughout stack. Every builder-level
         // edge/link created while this stack is non-empty is automatically
@@ -741,8 +716,7 @@ public:
     // isTopLevelStep: see buildSExpr -- only the outermost call from
     // processAssertion / build() should pass true. Recursive calls into
     // nested SExprs, merges, etc. must pass false (default).
-    BuildResult buildExpr(AstNodeExpr* nodep, int entryNode,
-                          bool isTopLevelStep = false) {
+    BuildResult buildExpr(AstNodeExpr* nodep, int entryNode, bool isTopLevelStep = false) {
         if (AstSExpr* const sexprp = VN_CAST(nodep, SExpr)) {
             return buildSExpr(sexprp, entryNode, isTopLevelStep);
         }
@@ -762,14 +736,14 @@ public:
             if (!lhs.valid() || !rhs.valid()) return BuildResult::fail();
             const int mergeNode = scopedCreateNode();
             if (lhs.finalCondp) {
-                guardedLink(lhs.termNode, mergeNode,
-                            sampled(lhs.finalCondp->cloneTreePure(false)), flp);
+                guardedLink(lhs.termNode, mergeNode, sampled(lhs.finalCondp->cloneTreePure(false)),
+                            flp);
             } else {
                 guardedLink(lhs.termNode, mergeNode, flp);
             }
             if (rhs.finalCondp) {
-                guardedLink(rhs.termNode, mergeNode,
-                            sampled(rhs.finalCondp->cloneTreePure(false)), flp);
+                guardedLink(rhs.termNode, mergeNode, sampled(rhs.finalCondp->cloneTreePure(false)),
+                            flp);
             } else {
                 guardedLink(rhs.termNode, mergeNode, flp);
             }
@@ -782,22 +756,21 @@ public:
             if (!lhs.valid() || !rhs.valid()) return BuildResult::fail();
             const int mergeNode = scopedCreateNode();
             if (lhs.finalCondp) {
-                guardedLink(lhs.termNode, mergeNode,
-                            sampled(lhs.finalCondp->cloneTreePure(false)), flp);
+                guardedLink(lhs.termNode, mergeNode, sampled(lhs.finalCondp->cloneTreePure(false)),
+                            flp);
             } else {
                 guardedLink(lhs.termNode, mergeNode, flp);
             }
             if (rhs.finalCondp) {
-                guardedLink(rhs.termNode, mergeNode,
-                            sampled(rhs.finalCondp->cloneTreePure(false)), flp);
+                guardedLink(rhs.termNode, mergeNode, sampled(rhs.finalCondp->cloneTreePure(false)),
+                            flp);
             } else {
                 guardedLink(rhs.termNode, mergeNode, flp);
             }
             return {mergeNode, nullptr};
         }
         if (AstSAnd* const andp = VN_CAST(nodep, SAnd)) {
-            return buildAndCombiner(andp->lhsp(), andp->rhsp(), entryNode,
-                                    andp->fileline());
+            return buildAndCombiner(andp->lhsp(), andp->rhsp(), entryNode, andp->fileline());
         }
         if (AstSIntersect* const intp = VN_CAST(nodep, SIntersect)) {
             // IEEE 1800-2023 16.9.6: SAnd with the additional constraint
@@ -810,8 +783,7 @@ public:
             const int rhsLen = fixedLength(intp->rhsp());
             if (lhsLen < 0 || rhsLen < 0) return BuildResult::fail();
             if (lhsLen != rhsLen) return BuildResult::fail();
-            return buildAndCombiner(intp->lhsp(), intp->rhsp(), entryNode,
-                                    intp->fileline());
+            return buildAndCombiner(intp->lhsp(), intp->rhsp(), entryNode, intp->fileline());
         }
         if (VN_IS(nodep, LogAnd)) {
             // Boolean AND: treat as leaf with the whole expr as finalCond
@@ -859,11 +831,9 @@ public:
     // If outAcceptpp is non-null, the accept expression is stored there
     // (caller must deleteTree when done). Used for standalone sequences
     // with pass handlers to avoid vacuous-pass spurious firings.
-    AstNodeExpr* emit(FileLine* flp, const SvaNfa& nfa,
-                      AstNodeExpr* triggerExprp, AstSenTree* senTreep,
-                      AstNodeExpr* acceptCondp, bool isCover,
-                      AstNodeExpr* disableExprp = nullptr,
-                      bool negated = false,
+    AstNodeExpr* emit(FileLine* flp, const SvaNfa& nfa, AstNodeExpr* triggerExprp,
+                      AstSenTree* senTreep, AstNodeExpr* acceptCondp, bool isCover,
+                      AstNodeExpr* disableExprp = nullptr, bool negated = false,
                       AstNodeExpr** outAcceptpp = nullptr) {
         const std::string baseName = m_names.get("");
         const int N = static_cast<int>(nfa.nodes.size());
@@ -871,8 +841,7 @@ public:
         // Identify registered nodes (targets of Edges)
         std::vector<bool> needsReg(N, false);
         for (const auto& edge : nfa.edges) {
-            if (edge.consumesCycle && edge.toId != nfa.acceptNode
-                && edge.toId != nfa.rejectNode
+            if (edge.consumesCycle && edge.toId != nfa.acceptNode && edge.toId != nfa.rejectNode
                 && !nfa.nodes[edge.toId].isRejectSink) {
                 needsReg[edge.toId] = true;
             }
@@ -892,14 +861,12 @@ public:
         for (int i = 0; i < N; ++i) {
             if (nfa.nodes[i].isAndCombiner) {
                 const std::string base = baseName + "__a" + std::to_string(i);
-                AstVar* const lp = new AstVar{flp, VVarType::MODULETEMP,
-                                              base + "_doneL",
+                AstVar* const lp = new AstVar{flp, VVarType::MODULETEMP, base + "_doneL",
                                               m_modp->findBitDType()};
                 lp->lifetime(VLifetime::STATIC_EXPLICIT);
                 m_modp->addStmtsp(lp);
                 doneLVars[i] = lp;
-                AstVar* const rp = new AstVar{flp, VVarType::MODULETEMP,
-                                              base + "_doneR",
+                AstVar* const rp = new AstVar{flp, VVarType::MODULETEMP, base + "_doneR",
                                               m_modp->findBitDType()};
                 rp->lifetime(VLifetime::STATIC_EXPLICIT);
                 m_modp->addStmtsp(rp);
@@ -908,14 +875,13 @@ public:
             }
             if (nfa.nodes[i].isCounter) {
                 const std::string base = baseName + "__c" + std::to_string(i);
-                AstVar* const activep = new AstVar{flp, VVarType::MODULETEMP,
-                                                   base + "_active",
+                AstVar* const activep = new AstVar{flp, VVarType::MODULETEMP, base + "_active",
                                                    m_modp->findBitDType()};
                 activep->lifetime(VLifetime::STATIC_EXPLICIT);
                 m_modp->addStmtsp(activep);
                 counterActiveVars[i] = activep;
-                AstVar* const cntp = new AstVar{flp, VVarType::MODULETEMP,
-                                                base + "_cnt", u32DType};
+                AstVar* const cntp
+                    = new AstVar{flp, VVarType::MODULETEMP, base + "_cnt", u32DType};
                 cntp->lifetime(VLifetime::STATIC_EXPLICIT);
                 m_modp->addStmtsp(cntp);
                 counterCountVars[i] = cntp;
@@ -924,8 +890,8 @@ public:
             if (!needsReg[i]) continue;
             if (i == nfa.startNode || nfa.nodes[i].isAccept || nfa.nodes[i].isReject) continue;
             const std::string varName = baseName + "__s" + std::to_string(i);
-            AstVar* const varp = new AstVar{flp, VVarType::MODULETEMP, varName,
-                                            m_modp->findBitDType()};
+            AstVar* const varp
+                = new AstVar{flp, VVarType::MODULETEMP, varName, m_modp->findBitDType()};
             varp->lifetime(VLifetime::STATIC_EXPLICIT);
             m_modp->addStmtsp(varp);
             stateVars[i] = varp;
@@ -948,13 +914,12 @@ public:
                 if (nfa.nodes[i].counterMin == 0) {
                     stateSig[i] = activeRefp;
                 } else {
-                    AstGte* const gtep = new AstGte{flp,
-                        new AstVarRef{flp, counterCountVars[i], VAccess::READ},
-                        new AstConst{flp, AstConst::WidthedValue{}, 32,
-                                     static_cast<uint32_t>(nfa.nodes[i].counterMin)}};
+                    AstGte* const gtep
+                        = new AstGte{flp, new AstVarRef{flp, counterCountVars[i], VAccess::READ},
+                                     new AstConst{flp, AstConst::WidthedValue{}, 32,
+                                                  static_cast<uint32_t>(nfa.nodes[i].counterMin)}};
                     gtep->dtypeSetBit();
-                    AstNodeExpr* const andp
-                        = new AstAnd{flp, activeRefp, gtep};
+                    AstNodeExpr* const andp = new AstAnd{flp, activeRefp, gtep};
                     andp->dtypeSetBit();
                     stateSig[i] = andp;
                 }
@@ -964,12 +929,10 @@ public:
         // Helper: build `state && $sampled(cond)` (cond may be null, in which
         // case returns just the state ref clone). Used by SAnd combiner to
         // derive per-side "accept this cycle" signals.
-        auto buildAcceptNow
-            = [flp](AstNodeExpr* stateExprp, AstNodeExpr* condp) -> AstNodeExpr* {
+        auto buildAcceptNow = [flp](AstNodeExpr* stateExprp, AstNodeExpr* condp) -> AstNodeExpr* {
             AstNodeExpr* const statep = stateExprp->cloneTreePure(false);
             if (!condp) return statep;
-            AstSampled* const sampp
-                = new AstSampled{flp, condp->cloneTreePure(false)};
+            AstSampled* const sampp = new AstSampled{flp, condp->cloneTreePure(false)};
             sampp->dtypeSetBit();
             AstNodeExpr* const andp = new AstAnd{flp, statep, sampp};
             andp->dtypeSetBit();
@@ -994,33 +957,22 @@ public:
                 if (l < 0 || r < 0) continue;
                 if (!stateSig[l] || !stateSig[r]) continue;
 
-                AstNodeExpr* const acceptLforOr
-                    = buildAcceptNow(stateSig[l], node.andLhsCondp);
-                AstNodeExpr* const acceptRforOr
-                    = buildAcceptNow(stateSig[r], node.andRhsCondp);
-                AstNodeExpr* const acceptLforOne
-                    = buildAcceptNow(stateSig[l], node.andLhsCondp);
-                AstNodeExpr* const acceptRforOne
-                    = buildAcceptNow(stateSig[r], node.andRhsCondp);
+                AstNodeExpr* const acceptLforOr = buildAcceptNow(stateSig[l], node.andLhsCondp);
+                AstNodeExpr* const acceptRforOr = buildAcceptNow(stateSig[r], node.andRhsCondp);
+                AstNodeExpr* const acceptLforOne = buildAcceptNow(stateSig[l], node.andLhsCondp);
+                AstNodeExpr* const acceptRforOne = buildAcceptNow(stateSig[r], node.andRhsCondp);
 
-                AstNodeExpr* const doneLRefp
-                    = new AstVarRef{flp, doneLVars[i], VAccess::READ};
-                AstNodeExpr* const doneROrp
-                    = new AstOr{flp, doneLRefp, acceptLforOr};
+                AstNodeExpr* const doneLRefp = new AstVarRef{flp, doneLVars[i], VAccess::READ};
+                AstNodeExpr* const doneROrp = new AstOr{flp, doneLRefp, acceptLforOr};
                 doneROrp->dtypeSetBit();
-                AstNodeExpr* const doneRRefp
-                    = new AstVarRef{flp, doneRVars[i], VAccess::READ};
-                AstNodeExpr* const doneRightOrp
-                    = new AstOr{flp, doneRRefp, acceptRforOr};
+                AstNodeExpr* const doneRRefp = new AstVarRef{flp, doneRVars[i], VAccess::READ};
+                AstNodeExpr* const doneRightOrp = new AstOr{flp, doneRRefp, acceptRforOr};
                 doneRightOrp->dtypeSetBit();
-                AstNodeExpr* const bothDonep
-                    = new AstAnd{flp, doneROrp, doneRightOrp};
+                AstNodeExpr* const bothDonep = new AstAnd{flp, doneROrp, doneRightOrp};
                 bothDonep->dtypeSetBit();
-                AstNodeExpr* const oneNowp
-                    = new AstOr{flp, acceptLforOne, acceptRforOne};
+                AstNodeExpr* const oneNowp = new AstOr{flp, acceptLforOne, acceptRforOne};
                 oneNowp->dtypeSetBit();
-                AstNodeExpr* const acceptp
-                    = new AstAnd{flp, bothDonep, oneNowp};
+                AstNodeExpr* const acceptp = new AstAnd{flp, bothDonep, oneNowp};
                 acceptp->dtypeSetBit();
                 stateSig[i] = acceptp;
                 changed = true;
@@ -1088,8 +1040,8 @@ public:
         }
 
         if (bodyp) {
-            AstAlways* const alwaysp = new AstAlways{
-                flp, VAlwaysKwd::ALWAYS, senTreep->cloneTree(false), bodyp};
+            AstAlways* const alwaysp
+                = new AstAlways{flp, VAlwaysKwd::ALWAYS, senTreep->cloneTree(false), bodyp};
             m_modp->addStmtsp(alwaysp);
         }
 
@@ -1108,8 +1060,7 @@ public:
             if (!counterActiveVars[ci]) continue;
             AstVar* const activep = counterActiveVars[ci];
             AstVar* const cntp = counterCountVars[ci];
-            const uint32_t counterMax
-                = static_cast<uint32_t>(nfa.nodes[ci].counterMax);
+            const uint32_t counterMax = static_cast<uint32_t>(nfa.nodes[ci].counterMax);
 
             // incoming = OR of edge-driven contributions from upstream states
             AstNodeExpr* incomingp = nullptr;
@@ -1117,8 +1068,7 @@ public:
                 if (edge.toId != ci) continue;
                 if (!edge.consumesCycle) continue;
                 if (!stateSig[edge.fromId]) continue;
-                AstNodeExpr* contrib
-                    = stateSig[edge.fromId]->cloneTreePure(false);
+                AstNodeExpr* contrib = stateSig[edge.fromId]->cloneTreePure(false);
                 contrib = andCond(flp, contrib, edge.condp);
                 if (disableExprp) {
                     AstNodeExpr* const notDisp
@@ -1137,17 +1087,16 @@ public:
             if (nfa.nodes[ci].counterMin == 0) {
                 inWindowp = new AstConst{flp, AstConst::BitTrue{}};
             } else {
-                inWindowp = new AstGte{flp,
-                    new AstVarRef{flp, cntp, VAccess::READ},
-                    new AstConst{flp, AstConst::WidthedValue{}, 32,
-                                 static_cast<uint32_t>(nfa.nodes[ci].counterMin)}};
+                inWindowp
+                    = new AstGte{flp, new AstVarRef{flp, cntp, VAccess::READ},
+                                 new AstConst{flp, AstConst::WidthedValue{}, 32,
+                                              static_cast<uint32_t>(nfa.nodes[ci].counterMin)}};
                 inWindowp->dtypeSetBit();
             }
             // accepted_now = in_window && $sampled(acceptCondp)
             AstNodeExpr* acceptedNowp = nullptr;
             if (acceptCondp) {
-                AstSampled* const sampp
-                    = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
+                AstSampled* const sampp = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
                 sampp->dtypeSetBit();
                 acceptedNowp = new AstAnd{flp, inWindowp, sampp};
                 acceptedNowp->dtypeSetBit();
@@ -1156,9 +1105,9 @@ public:
             }
 
             // counter_at_end = counter == counterMax
-            AstNodeExpr* const counterAtEndp = new AstEq{flp,
-                new AstVarRef{flp, cntp, VAccess::READ},
-                new AstConst{flp, AstConst::WidthedValue{}, 32, counterMax}};
+            AstNodeExpr* const counterAtEndp
+                = new AstEq{flp, new AstVarRef{flp, cntp, VAccess::READ},
+                            new AstConst{flp, AstConst::WidthedValue{}, 32, counterMax}};
             counterAtEndp->dtypeSetBit();
 
             // done = accepted_now || counter == counterMax
@@ -1166,35 +1115,32 @@ public:
             donep->dtypeSetBit();
 
             // then-branch: active <= 0
-            AstAssignDly* const clearActivep = new AstAssignDly{flp,
-                new AstVarRef{flp, activep, VAccess::WRITE},
-                new AstConst{flp, AstConst::BitFalse{}}};
+            AstAssignDly* const clearActivep
+                = new AstAssignDly{flp, new AstVarRef{flp, activep, VAccess::WRITE},
+                                   new AstConst{flp, AstConst::BitFalse{}}};
             // else-branch: counter <= counter + 1
-            AstAdd* const addExprp = new AstAdd{flp,
-                new AstVarRef{flp, cntp, VAccess::READ},
-                new AstConst{flp, AstConst::WidthedValue{}, 32, 1u}};
+            AstAdd* const addExprp
+                = new AstAdd{flp, new AstVarRef{flp, cntp, VAccess::READ},
+                             new AstConst{flp, AstConst::WidthedValue{}, 32, 1u}};
             addExprp->dtypeFrom(cntp);
-            AstAssignDly* const incCountp = new AstAssignDly{flp,
-                new AstVarRef{flp, cntp, VAccess::WRITE}, addExprp};
-            AstIf* const doneIfp
-                = new AstIf{flp, donep, clearActivep, incCountp};
+            AstAssignDly* const incCountp
+                = new AstAssignDly{flp, new AstVarRef{flp, cntp, VAccess::WRITE}, addExprp};
+            AstIf* const doneIfp = new AstIf{flp, donep, clearActivep, incCountp};
 
             // if (active) { doneIfp } else if (incoming) { active<=1; cnt<=0; }
-            AstAssignDly* const setActivep = new AstAssignDly{flp,
-                new AstVarRef{flp, activep, VAccess::WRITE},
-                new AstConst{flp, AstConst::BitTrue{}}};
-            AstAssignDly* const resetCountp = new AstAssignDly{flp,
-                new AstVarRef{flp, cntp, VAccess::WRITE},
-                new AstConst{flp, AstConst::WidthedValue{}, 32, 0u}};
+            AstAssignDly* const setActivep
+                = new AstAssignDly{flp, new AstVarRef{flp, activep, VAccess::WRITE},
+                                   new AstConst{flp, AstConst::BitTrue{}}};
+            AstAssignDly* const resetCountp
+                = new AstAssignDly{flp, new AstVarRef{flp, cntp, VAccess::WRITE},
+                                   new AstConst{flp, AstConst::WidthedValue{}, 32, 0u}};
             setActivep->addNext(resetCountp);
-            AstIf* const startIfp
-                = new AstIf{flp, incomingp, setActivep, nullptr};
-            AstIf* const topIfp = new AstIf{flp,
-                new AstVarRef{flp, activep, VAccess::READ},
-                doneIfp, startIfp};
+            AstIf* const startIfp = new AstIf{flp, incomingp, setActivep, nullptr};
+            AstIf* const topIfp
+                = new AstIf{flp, new AstVarRef{flp, activep, VAccess::READ}, doneIfp, startIfp};
 
-            AstAlways* const counterAlwaysp = new AstAlways{flp,
-                VAlwaysKwd::ALWAYS, senTreep->cloneTree(false), topIfp};
+            AstAlways* const counterAlwaysp
+                = new AstAlways{flp, VAlwaysKwd::ALWAYS, senTreep->cloneTree(false), topIfp};
             m_modp->addStmtsp(counterAlwaysp);
         }
 
@@ -1217,49 +1163,42 @@ public:
             const int r = node.andRhsTermId;
             if (!stateSig[l] || !stateSig[r] || !stateSig[ai]) continue;
 
-            AstAssignDly* const clearLp = new AstAssignDly{flp,
-                new AstVarRef{flp, doneLVars[ai], VAccess::WRITE},
-                new AstConst{flp, AstConst::BitFalse{}}};
-            AstAssignDly* const clearRp = new AstAssignDly{flp,
-                new AstVarRef{flp, doneRVars[ai], VAccess::WRITE},
-                new AstConst{flp, AstConst::BitFalse{}}};
+            AstAssignDly* const clearLp
+                = new AstAssignDly{flp, new AstVarRef{flp, doneLVars[ai], VAccess::WRITE},
+                                   new AstConst{flp, AstConst::BitFalse{}}};
+            AstAssignDly* const clearRp
+                = new AstAssignDly{flp, new AstVarRef{flp, doneRVars[ai], VAccess::WRITE},
+                                   new AstConst{flp, AstConst::BitFalse{}}};
             clearLp->addNext(clearRp);
 
-            AstNodeExpr* const acceptLNowp
-                = buildAcceptNow(stateSig[l], node.andLhsCondp);
-            AstNodeExpr* const acceptRNowp
-                = buildAcceptNow(stateSig[r], node.andRhsCondp);
+            AstNodeExpr* const acceptLNowp = buildAcceptNow(stateSig[l], node.andLhsCondp);
+            AstNodeExpr* const acceptRNowp = buildAcceptNow(stateSig[r], node.andRhsCondp);
             AstNodeExpr* gateLp = acceptLNowp;
             AstNodeExpr* gateRp = acceptRNowp;
             if (disableExprp) {
-                AstNodeExpr* const notDisL
-                    = new AstNot{flp, disableExprp->cloneTreePure(false)};
+                AstNodeExpr* const notDisL = new AstNot{flp, disableExprp->cloneTreePure(false)};
                 notDisL->dtypeSetBit();
                 gateLp = new AstAnd{flp, gateLp, notDisL};
                 gateLp->dtypeSetBit();
-                AstNodeExpr* const notDisR
-                    = new AstNot{flp, disableExprp->cloneTreePure(false)};
+                AstNodeExpr* const notDisR = new AstNot{flp, disableExprp->cloneTreePure(false)};
                 notDisR->dtypeSetBit();
                 gateRp = new AstAnd{flp, gateRp, notDisR};
                 gateRp->dtypeSetBit();
             }
-            AstAssignDly* const setLp = new AstAssignDly{flp,
-                new AstVarRef{flp, doneLVars[ai], VAccess::WRITE},
-                new AstConst{flp, AstConst::BitTrue{}}};
-            AstIf* const setLIfp
-                = new AstIf{flp, gateLp, setLp, nullptr};
-            AstAssignDly* const setRp = new AstAssignDly{flp,
-                new AstVarRef{flp, doneRVars[ai], VAccess::WRITE},
-                new AstConst{flp, AstConst::BitTrue{}}};
-            AstIf* const setRIfp
-                = new AstIf{flp, gateRp, setRp, nullptr};
+            AstAssignDly* const setLp
+                = new AstAssignDly{flp, new AstVarRef{flp, doneLVars[ai], VAccess::WRITE},
+                                   new AstConst{flp, AstConst::BitTrue{}}};
+            AstIf* const setLIfp = new AstIf{flp, gateLp, setLp, nullptr};
+            AstAssignDly* const setRp
+                = new AstAssignDly{flp, new AstVarRef{flp, doneRVars[ai], VAccess::WRITE},
+                                   new AstConst{flp, AstConst::BitTrue{}}};
+            AstIf* const setRIfp = new AstIf{flp, gateRp, setRp, nullptr};
             setLIfp->addNext(setRIfp);
 
-            AstIf* const topp = new AstIf{flp,
-                stateSig[ai]->cloneTreePure(false),
-                clearLp, setLIfp};
-            AstAlways* const combAlwaysp = new AstAlways{flp,
-                VAlwaysKwd::ALWAYS, senTreep->cloneTree(false), topp};
+            AstIf* const topp
+                = new AstIf{flp, stateSig[ai]->cloneTreePure(false), clearLp, setLIfp};
+            AstAlways* const combAlwaysp
+                = new AstAlways{flp, VAlwaysKwd::ALWAYS, senTreep->cloneTree(false), topp};
             m_modp->addStmtsp(combAlwaysp);
         }
 
@@ -1287,16 +1226,14 @@ public:
             if (nfa.nodes[edge.fromId].isCounter) {
                 const int ci = edge.fromId;
                 // Accept: use srcSig as-is (active && link_cond)
-                terminalActivep = orExprs(flp, terminalActivep,
-                                          srcSig->cloneTreePure(false));
+                terminalActivep = orExprs(flp, terminalActivep, srcSig->cloneTreePure(false));
                 // Reject base: srcSig && (counter == counterRange)
-                AstNodeExpr* const atEndp = new AstEq{flp,
-                    new AstVarRef{flp, counterCountVars[ci], VAccess::READ},
-                    new AstConst{flp, AstConst::WidthedValue{}, 32,
-                                 static_cast<uint32_t>(nfa.nodes[ci].counterMax)}};
+                AstNodeExpr* const atEndp
+                    = new AstEq{flp, new AstVarRef{flp, counterCountVars[ci], VAccess::READ},
+                                new AstConst{flp, AstConst::WidthedValue{}, 32,
+                                             static_cast<uint32_t>(nfa.nodes[ci].counterMax)}};
                 atEndp->dtypeSetBit();
-                AstNodeExpr* const expireContribp
-                    = new AstAnd{flp, srcSig, atEndp};
+                AstNodeExpr* const expireContribp = new AstAnd{flp, srcSig, atEndp};
                 expireContribp->dtypeSetBit();
                 rejectBasep = orExprs(flp, rejectBasep, expireContribp);
             } else if (nfa.nodes[edge.fromId].isUnbounded
@@ -1307,11 +1244,9 @@ public:
                 // the exact cycle the aggregated sequence matches, so
                 // treating "formula false" as reject would be wrong -- the
                 // constituent sub-NFAs already emit their own rejects.
-                terminalActivep
-                    = orExprs(flp, terminalActivep, srcSig);
+                terminalActivep = orExprs(flp, terminalActivep, srcSig);
             } else {
-                terminalActivep = orExprs(flp, terminalActivep,
-                                          srcSig->cloneTreePure(false));
+                terminalActivep = orExprs(flp, terminalActivep, srcSig->cloneTreePure(false));
                 rejectBasep = orExprs(flp, rejectBasep, srcSig);
             }
         }
@@ -1327,9 +1262,7 @@ public:
                 }
             }
         }
-        if (!terminalActivep) {
-            terminalActivep = new AstConst{flp, AstConst::BitFalse{}};
-        }
+        if (!terminalActivep) { terminalActivep = new AstConst{flp, AstConst::BitFalse{}}; }
 
         // Phase 3a: "required-step" rejection.
         // For every Link marked rejectOnFail, reject fires when the source
@@ -1344,15 +1277,12 @@ public:
             if (edge.consumesCycle) continue;
             if (!stateSig[edge.fromId]) continue;
             if (!edge.condp) continue;
-            AstNodeExpr* const srcSig
-                = stateSig[edge.fromId]->cloneTreePure(false);
-            AstNodeExpr* const notCondp
-                = new AstNot{flp, edge.condp->cloneTreePure(false)};
+            AstNodeExpr* const srcSig = stateSig[edge.fromId]->cloneTreePure(false);
+            AstNodeExpr* const notCondp = new AstNot{flp, edge.condp->cloneTreePure(false)};
             notCondp->dtypeSetBit();
             AstNodeExpr* const failp = new AstAnd{flp, srcSig, notCondp};
             failp->dtypeSetBit();
-            requiredStepRejectp
-                = orExprs(flp, requiredStepRejectp, failp);
+            requiredStepRejectp = orExprs(flp, requiredStepRejectp, failp);
         }
 
         // Phase 3b: Throughout-drop rejection.
@@ -1410,18 +1340,15 @@ public:
         // either kind of failure during disable is abandoned per IEEE 16.12.
         if (disableExprp) {
             if (throughoutRejectp) {
-                AstNodeExpr* const notDisp
-                    = new AstNot{flp, disableExprp->cloneTreePure(false)};
+                AstNodeExpr* const notDisp = new AstNot{flp, disableExprp->cloneTreePure(false)};
                 notDisp->dtypeSetBit();
                 throughoutRejectp = new AstAnd{flp, throughoutRejectp, notDisp};
                 throughoutRejectp->dtypeSetBit();
             }
             if (requiredStepRejectp) {
-                AstNodeExpr* const notDisp
-                    = new AstNot{flp, disableExprp->cloneTreePure(false)};
+                AstNodeExpr* const notDisp = new AstNot{flp, disableExprp->cloneTreePure(false)};
                 notDisp->dtypeSetBit();
-                requiredStepRejectp
-                    = new AstAnd{flp, requiredStepRejectp, notDisp};
+                requiredStepRejectp = new AstAnd{flp, requiredStepRejectp, notDisp};
                 requiredStepRejectp->dtypeSetBit();
             }
         }
@@ -1460,8 +1387,7 @@ public:
                     negRejectp = orExprs(flp, negRejectp, requiredStepRejectp);
                     if (negRejectp) negRejectp->dtypeSetBit();
                 }
-                return negRejectp ? negRejectp
-                                  : new AstConst{flp, AstConst::BitFalse{}};
+                return negRejectp ? negRejectp : new AstConst{flp, AstConst::BitFalse{}};
             }
             // Negated assert/assume: return !accept (fails when P matches)
             AstNodeExpr* acceptp = terminalActivep;
@@ -1490,8 +1416,7 @@ public:
                 AstNodeExpr* const sampledCondp
                     = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
                 sampledCondp->dtypeFrom(acceptCondp);
-                AstNodeExpr* const acceptp
-                    = new AstAnd{flp, terminalActivep, sampledCondp};
+                AstNodeExpr* const acceptp = new AstAnd{flp, terminalActivep, sampledCondp};
                 acceptp->dtypeSetBit();
                 return acceptp;
             }
@@ -1518,8 +1443,7 @@ public:
         if (outAcceptpp) {
             AstNodeExpr* acceptExprp = terminalActivep->cloneTreePure(false);
             if (acceptCondp) {
-                AstNodeExpr* const sp
-                    = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
+                AstNodeExpr* const sp = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
                 sp->dtypeSetBit();
                 acceptExprp = new AstAnd{flp, acceptExprp, sp};
                 acceptExprp->dtypeSetBit();
@@ -1580,8 +1504,7 @@ class AssertNfaVisitor final : public VNVisitor {
         propExprp = propExprp->cloneTree(false);
 
         // Build substitution map for formal port parameters
-        const V3TaskConnects tconnects
-            = V3Task::taskConnects(funcrefp, propyp->stmtsp());
+        const V3TaskConnects tconnects = V3Task::taskConnects(funcrefp, propyp->stmtsp());
         std::unordered_map<const AstVar*, AstNodeExpr*> portMap;
         for (const auto& tconnect : tconnects) {
             portMap[tconnect.first] = tconnect.second->exprp();
@@ -1594,9 +1517,8 @@ class AssertNfaVisitor final : public VNVisitor {
             if (AstVar* const varp = VN_CAST(stmtp, Var)) {
                 if (!varp->isIO()) {
                     const string newName = m_propVarNames.get(varp);
-                    AstVar* const newVarp = new AstVar{
-                        varp->fileline(), VVarType::MODULETEMP, newName,
-                        varp->dtypep()};
+                    AstVar* const newVarp = new AstVar{varp->fileline(), VVarType::MODULETEMP,
+                                                       newName, varp->dtypep()};
                     newVarp->lifetime(VLifetime::STATIC_EXPLICIT);
                     m_modp->addStmtsp(newVarp);
                     localVarMap[varp] = newVarp;
@@ -1637,9 +1559,8 @@ class AssertNfaVisitor final : public VNVisitor {
 
         // Merge clock events
         if (outerSpecp->sensesp() && propExprp->sensesp()) {
-            outerSpecp->v3warn(
-                E_UNSUPPORTED,
-                "Unsupported: Clock event before property call and in its body");
+            outerSpecp->v3warn(E_UNSUPPORTED,
+                               "Unsupported: Clock event before property call and in its body");
             pushDeletep(propExprp->sensesp()->unlinkFrBack());
         }
         if (outerSpecp->sensesp()) {
@@ -1674,9 +1595,7 @@ class AssertNfaVisitor final : public VNVisitor {
 
     static PropertyParts decomposeProperty(AstNode* propp) {
         PropertyParts parts;
-        if (AstPropSpec* const specp = VN_CAST(propp, PropSpec)) {
-            propp = specp->propp();
-        }
+        if (AstPropSpec* const specp = VN_CAST(propp, PropSpec)) { propp = specp->propp(); }
         if (AstImplication* const implp = VN_CAST(propp, Implication)) {
             parts.hasImplication = true;
             parts.isOverlapped = implp->isOverlapped();
@@ -1696,8 +1615,7 @@ class AssertNfaVisitor final : public VNVisitor {
         // hasMultiCycleExpr can see the property body.
         if (AstPropSpec* const specp = VN_CAST(assertp->propp(), PropSpec)) {
             if (AstFuncRef* const funcrefp = VN_CAST(specp->propp(), FuncRef)) {
-                if (const AstProperty* const propyp
-                    = VN_CAST(funcrefp->taskp(), Property)) {
+                if (const AstProperty* const propyp = VN_CAST(funcrefp->taskp(), Property)) {
                     inlineNamedProperty(specp, funcrefp, propyp);
                     // specp is now dangling -- re-read propp() below
                 }
@@ -1725,8 +1643,8 @@ class AssertNfaVisitor final : public VNVisitor {
         AstNodeExpr* disableExprp = nullptr;
         if (propSpecp) {
             if (!senTreep && propSpecp->sensesp()) {
-                senTreep = new AstSenTree{propSpecp->fileline(),
-                                          propSpecp->sensesp()->cloneTree(true)};
+                senTreep
+                    = new AstSenTree{propSpecp->fileline(), propSpecp->sensesp()->cloneTree(true)};
                 senTreeOwned = true;
             }
             disableExprp = propSpecp->disablep();
@@ -1748,12 +1666,10 @@ class AssertNfaVisitor final : public VNVisitor {
             // {startNode, boolExpr} (no NFA nodes added). For multi-cycle
             // antecedents (ConsRep, SExpr, SGotoRep, ...) it builds a real
             // NFA sub-graph whose terminal is the "match" point.
-            const BuildResult antResult
-                = builder.buildExpr(parts.triggerExprp, nfa.startNode);
+            const BuildResult antResult = builder.buildExpr(parts.triggerExprp, nfa.startNode);
             if (!antResult.valid()) {
-                assertp->v3warn(E_UNSUPPORTED,
-                                "Unsupported: assertion antecedent contains SVA"
-                                " construct not yet supported by NFA engine");
+                assertp->v3warn(E_UNSUPPORTED, "Unsupported: assertion antecedent contains SVA"
+                                               " construct not yet supported by NFA engine");
                 return;
             }
 
@@ -1766,8 +1682,7 @@ class AssertNfaVisitor final : public VNVisitor {
             const int trigNode = nfa.createNode();
             if (antResult.finalCondp) {
                 nfa.addLink(antResult.termNode, trigNode,
-                            new AstSampled{flp,
-                                           antResult.finalCondp->cloneTreePure(false)});
+                            new AstSampled{flp, antResult.finalCondp->cloneTreePure(false)});
             } else {
                 nfa.addLink(antResult.termNode, trigNode);
             }
@@ -1828,19 +1743,16 @@ class AssertNfaVisitor final : public VNVisitor {
         // Without this, `!reject == 1` on non-terminal cycles causes
         // vacuous-pass firings that don't occur in Questa.
         AstAssert* const assertAssertp = VN_CAST(assertp, Assert);
-        const bool needAccept = !isCover && !parts.hasImplication
-                                && assertAssertp && assertAssertp->passsp();
+        const bool needAccept
+            = !isCover && !parts.hasImplication && assertAssertp && assertAssertp->passsp();
         AstNodeExpr* acceptExprp = nullptr;
 
         // Emit NFA hardware
         AstNodeExpr* const alwaysTriggerp = new AstConst{flp, AstConst::BitTrue{}};
         AstNodeExpr* const outputExprp
-            = m_emitterp->emit(flp, nfa, alwaysTriggerp, senTreep,
-                               result.finalCondp, isCover,
-                               disableExprp ? disableExprp->cloneTreePure(false)
-                                            : nullptr,
-                               negated,
-                               needAccept ? &acceptExprp : nullptr);
+            = m_emitterp->emit(flp, nfa, alwaysTriggerp, senTreep, result.finalCondp, isCover,
+                               disableExprp ? disableExprp->cloneTreePure(false) : nullptr,
+                               negated, needAccept ? &acceptExprp : nullptr);
 
         // Clean up locally-owned temporaries (emit cloned them)
         alwaysTriggerp->deleteTree();
@@ -1852,8 +1764,7 @@ class AssertNfaVisitor final : public VNVisitor {
             AstNode* passsp = assertAssertp->passsp();
             if (passsp) {
                 passsp->unlinkFrBackWithNext();
-                AstIf* const gateIfp
-                    = new AstIf{flp, acceptExprp, passsp, nullptr};
+                AstIf* const gateIfp = new AstIf{flp, acceptExprp, passsp, nullptr};
                 assertAssertp->addPasssp(gateIfp);
             } else {
                 acceptExprp->deleteTree();
@@ -1871,9 +1782,8 @@ class AssertNfaVisitor final : public VNVisitor {
             VL_DO_DANGLING(pushDeletep(oldPropp), oldPropp);
         }
 
-        UINFO(4, "NFA converted assertion at " << flp << ", "
-                  << nfa.nodes.size() << " nodes, "
-                  << nfa.edges.size() << " edges" << endl);
+        UINFO(4, "NFA converted assertion at " << flp << ", " << nfa.nodes.size() << " nodes, "
+                                               << nfa.edges.size() << " edges" << endl);
     }
 
     // VISITORS
