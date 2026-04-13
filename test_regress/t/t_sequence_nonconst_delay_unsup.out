@@ -3,21 +3,4 @@
    14 |   assert property (@(posedge clk) (a ##delay b) and (c ##1 d));
       |   ^~~~~~
                     ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
-%Error: t/t_sequence_nonconst_delay_unsup.v:14:38: Delay value is not an elaboration-time constant (IEEE 1800-2023 16.7)
-                                                 : ... note: In instance 't'
-   14 |   assert property (@(posedge clk) (a ##delay b) and (c ##1 d));
-      |                                      ^~
-        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: t/t_sequence_nonconst_delay_unsup.v:14:38: Usage of cycle delays requires default clocking (IEEE 1800-2023 14.11)
-                                                 : ... note: In instance 't'
-   14 |   assert property (@(posedge clk) (a ##delay b) and (c ##1 d));
-      |                                      ^~
-%Error: t/t_sequence_nonconst_delay_unsup.v:14:56: Usage of cycle delays requires default clocking (IEEE 1800-2023 14.11)
-                                                 : ... note: In instance 't'
-   14 |   assert property (@(posedge clk) (a ##delay b) and (c ##1 d));
-      |                                                        ^~
-%Error: Internal Error: t/t_sequence_nonconst_delay_unsup.v:14:38: ../V3Ast.cpp:#: AstSExpr must have non-nullptr delayp()
-                                                                 : ... note: In instance 't'
-   14 |   assert property (@(posedge clk) (a ##delay b) and (c ##1 d));
-      |                                      ^~
-                        ... This fatal error may be caused by the earlier error(s); resolve those first.
+%Error: Exiting due to

@@ -1785,7 +1785,15 @@ class AssertNfaVisitor final : public VNVisitor {
             if (!antResult.valid()) {
                 assertp->v3warn(E_UNSUPPORTED, "Unsupported: assertion antecedent contains SVA"
                                                " construct not yet supported by NFA engine");
+                if (senTreeOwned) senTreep->deleteTree();
                 if (disableExprUnlinked) disableExprp->deleteTree();
+                // Replace property with a safe placeholder so downstream passes
+                // don't crash on the leftover SExpr nodes (--debug-check, ASAN).
+                if (propSpecp) {
+                    AstNode* const innerPropp = propSpecp->propp();
+                    innerPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
+                    VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
+                }
                 return;
             }
 
@@ -1854,7 +1862,19 @@ class AssertNfaVisitor final : public VNVisitor {
                             "Unsupported: assertion contains SVA construct not yet"
                             " supported by NFA engine (e.g. intersect, sequence and,"
                             " complex throughout)");
+            if (senTreeOwned) senTreep->deleteTree();
             if (disableExprUnlinked) disableExprp->deleteTree();
+            // Replace property with a safe placeholder so downstream passes
+            // don't crash on the leftover SExpr nodes (--debug-check, ASAN).
+            if (propSpecp) {
+                AstNode* const innerPropp = propSpecp->propp();
+                innerPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
+                VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
+            } else {
+                AstNode* const oldPropp = assertp->propp();
+                oldPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
+                VL_DO_DANGLING(pushDeletep(oldPropp), oldPropp);
+            }
             return;
         }
 
