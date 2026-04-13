@@ -845,8 +845,8 @@ public:
     AstNodeExpr* emit(FileLine* flp, const SvaNfa& nfa, AstNodeExpr* triggerExprp,
                       AstSenTree* senTreep, AstNodeExpr* acceptCondp, bool isCover,
                       AstNodeExpr* disableExprp = nullptr, bool negated = false,
-                      AstNodeExpr** outAcceptpp = nullptr,
-                      AstVar* disableCntVarp = nullptr, AstVar* snapshotVarp = nullptr) {
+                      AstNodeExpr** outAcceptpp = nullptr, AstVar* disableCntVarp = nullptr,
+                      AstVar* snapshotVarp = nullptr) {
         const std::string baseName = m_names.get("");
         const int N = static_cast<int>(nfa.nodes.size());
 
@@ -1063,9 +1063,9 @@ public:
             // check then compares snapshotVarp vs disableCntVarp to decide
             // whether disable fired during the evaluation.
             if (snapshotVarp && disableCntVarp) {
-                AstAssignDly* const snapAssignp = new AstAssignDly{
-                    flp, new AstVarRef{flp, snapshotVarp, VAccess::WRITE},
-                    new AstVarRef{flp, disableCntVarp, VAccess::READ}};
+                AstAssignDly* const snapAssignp
+                    = new AstAssignDly{flp, new AstVarRef{flp, snapshotVarp, VAccess::WRITE},
+                                       new AstVarRef{flp, disableCntVarp, VAccess::READ}};
                 bodyp->addNext(snapAssignp);
             }
             AstAlways* const alwaysp
@@ -1722,8 +1722,8 @@ class AssertNfaVisitor final : public VNVisitor {
         // Detect $sampled inside the disable expression: cannot use @(posedge
         // disableExpr) as a sensitivity if disableExpr contains $sampled.
         // Fall back to the basic !disable gate for such cases.
-        const bool disableHasSampled = disableExprp
-            && disableExprp->exists([](const AstSampled*) { return true; });
+        const bool disableHasSampled
+            = disableExprp && disableExprp->exists([](const AstSampled*) { return true; });
         if (disableExprp && !parts.hasImplication && !VN_IS(disableExprp, Const)
             && !disableHasSampled) {
             AstNodeDType* const u32DTypep = m_modp->findBasicDType(VBasicDTypeKwd::UINT32);
@@ -1733,16 +1733,14 @@ class AssertNfaVisitor final : public VNVisitor {
             m_modp->addStmtsp(disableCntVarp);
 
             // always @(posedge disableExpr) disableCnt++
-            AstNodeExpr* const rdRefp
-                = new AstVarRef{flp, disableCntVarp, VAccess::READ};
-            AstNodeExpr* const wrRefp
-                = new AstVarRef{flp, disableCntVarp, VAccess::WRITE};
-            AstNodeExpr* const incrExprp = new AstAdd{flp, rdRefp,
-                new AstConst{flp, AstConst::WidthedValue{}, 32, 1u}};
+            AstNodeExpr* const rdRefp = new AstVarRef{flp, disableCntVarp, VAccess::READ};
+            AstNodeExpr* const wrRefp = new AstVarRef{flp, disableCntVarp, VAccess::WRITE};
+            AstNodeExpr* const incrExprp
+                = new AstAdd{flp, rdRefp, new AstConst{flp, AstConst::WidthedValue{}, 32, 1u}};
             incrExprp->dtypeFrom(disableCntVarp);
             AstAssign* const incrAssignp = new AstAssign{flp, wrRefp, incrExprp};
-            AstSenItem* const senItemp = new AstSenItem{
-                flp, VEdgeType::ET_POSEDGE, disableExprp->cloneTreePure(false)};
+            AstSenItem* const senItemp
+                = new AstSenItem{flp, VEdgeType::ET_POSEDGE, disableExprp->cloneTreePure(false)};
             AstSenTree* const disSenp = new AstSenTree{flp, senItemp};
             AstAlways* const disAlwaysp
                 = new AstAlways{flp, VAlwaysKwd::ALWAYS, disSenp, incrAssignp};
@@ -1863,11 +1861,10 @@ class AssertNfaVisitor final : public VNVisitor {
 
         // Emit NFA hardware
         AstNodeExpr* const alwaysTriggerp = new AstConst{flp, AstConst::BitTrue{}};
-        AstNodeExpr* const outputExprp
-            = m_emitterp->emit(flp, nfa, alwaysTriggerp, senTreep, result.finalCondp, isCover,
-                               disableExprp ? disableExprp->cloneTreePure(false) : nullptr,
-                               negated, needAccept ? &acceptExprp : nullptr,
-                               disableCntVarp, snapshotVarp);
+        AstNodeExpr* const outputExprp = m_emitterp->emit(
+            flp, nfa, alwaysTriggerp, senTreep, result.finalCondp, isCover,
+            disableExprp ? disableExprp->cloneTreePure(false) : nullptr, negated,
+            needAccept ? &acceptExprp : nullptr, disableCntVarp, snapshotVarp);
 
         // Clean up locally-owned temporaries (emit cloned them)
         alwaysTriggerp->deleteTree();
