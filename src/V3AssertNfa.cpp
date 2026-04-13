@@ -1883,9 +1883,7 @@ class AssertNfaVisitor final : public VNVisitor {
         // Delete fresh finalCondp nodes not attached to the original AST.
         // emit() always cloneTreePure()s finalCondp, so we own any freshly
         // allocated node (backp()==nullptr means it has no AST parent).
-        if (result.finalCondp && !result.finalCondp->backp()) {
-            result.finalCondp->deleteTree();
-        }
+        if (result.finalCondp && !result.finalCondp->backp()) { result.finalCondp->deleteTree(); }
 
         // Gate pass handler with accept signal to avoid vacuous-pass
         // firings on non-terminal cycles (standalone sequences only).
