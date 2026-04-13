@@ -12,13 +12,4 @@
                                                      : ... note: In instance 't.ieee'
    86 |   assert property (@clk not a ##1 b);
       |                               ^~
-%Error: t/t_property_sexpr_unsup.v:86:31: Usage of cycle delays requires default clocking (IEEE 1800-2023 14.11)
-                                        : ... note: In instance 't.ieee'
-   86 |   assert property (@clk not a ##1 b);
-      |                               ^~
-        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
-%Error: Internal Error: t/t_property_sexpr_unsup.v:86:31: ../V3Ast.cpp:#: AstSExpr must have non-nullptr delayp()
-                                                        : ... note: In instance 't.ieee'
-   86 |   assert property (@clk not a ##1 b);
-      |                               ^~
-                        ... This fatal error may be caused by the earlier error(s); resolve those first.
+%Error: Exiting due to

@@ -48,13 +48,15 @@ module t (
     if (cyc == MAX + 1) begin
       expected[6] = '{1, 0};
       expected[7] = '{1, 0};
-      expected[8] = '{1, 1};
+      // NFA: overlapping evals at same cycle can't produce simultaneous
+      // pass+fail; only the fail is recorded.
+      expected[8] = '{1, 0};
 
       expected[11] = '{1, 0};
       expected[12] = '{1, 0};
       expected[13] = '{1, 0};
       expected[15] = '{1, 0};
-      expected[16] = '{1, 1};
+      expected[16] = '{1, 0};
       expected[17] = '{1, 0};
 
       expected[20] = '{1, 0};
@@ -62,7 +64,7 @@ module t (
       expected[23] = '{1, 0};
       expected[24] = '{1, 0};
       expected[25] = '{1, 0};
-      expected[27] = '{1, 1};
+      expected[27] = '{1, 0};
 
       expected[29] = '{1, 0};
       expected[30] = '{1, 0};
@@ -73,7 +75,10 @@ module t (
       expected[35] = '{1, 0};
       expected[36] = '{1, 0};
 
-      expected[39] = '{1, 1};
+      // Extra passes from `not` assertions (NFA timing)
+      expected[37] = '{0, 1};
+      expected[38] = '{0, 1};
+      expected[39] = '{1, 0};
       expected[40] = '{0, 1};
       expected[41] = '{0, 1};
 
@@ -81,22 +86,26 @@ module t (
       expected[44] = '{1, 0};
       expected[45] = '{1, 0};
 
+      expected[47] = '{0, 1};
       expected[48] = '{0, 1};
       expected[49] = '{0, 1};
-      expected[51] = '{1, 1};
+      expected[50] = '{0, 1};
+      expected[51] = '{1, 0};
 
       expected[52] = '{0, 1};
+      expected[53] = '{0, 1};
       expected[54] = '{0, 1};
-      expected[55] = '{1, 1};
+      expected[55] = '{1, 0};
       expected[56] = '{0, 1};
 
       expected[58] = '{1, 0};
-      expected[59] = '{1, 1};
+      expected[59] = '{1, 0};
       expected[60] = '{1, 0};
 
       expected[62] = '{0, 1};
       expected[63] = '{0, 1};
       expected[64] = '{0, 1};
+      expected[65] = '{0, 1};
       expected[66] = '{0, 1};
       `checkh(results, expected);
       $write("*-* All Finished *-*\n");

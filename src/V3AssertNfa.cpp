@@ -28,6 +28,7 @@
 
 #include "V3AssertNfa.h"
 #include "V3Const.h"
+#include "V3Task.h"
 #include "V3UniqueNames.h"
 
 #include <vector>
@@ -566,11 +567,14 @@ class SvaNfaBuilder final {
         int currentNode = entryNode;
         for (int i = 0; i < n; ++i) {
             const int waitNode = scopedCreateNode();
-            if (i == 0) {
-                guardedLink(currentNode, waitNode, flp);
-            } else {
-                guardedEdge(currentNode, waitNode, flp);
-            }
+            // Edge (consume 1 cycle) for ALL iterations including the
+            // first. The IEEE expansion `(!expr [*0:$]) ##1 expr` has
+            // a `##1` before each match check. Using a Link for i==0
+            // was incorrect: (a) it allowed same-cycle matching (too
+            // early), and (b) the Link contribution was discarded in
+            // Phase 2 because waitNode is registered (self-loop Edge),
+            // so the goto rep NFA never activated.
+            guardedEdge(currentNode, waitNode, flp);
             AstNodeExpr* const notExprp
                 = new AstNot{flp, exprp->cloneTreePure(false)};
             notExprp->dtypeSetBit();
@@ -590,7 +594,7 @@ class SvaNfaBuilder final {
     // disjoint sub-NFAs from the same entry node and aggregate via a
     // done-latch combiner. See spec 3.6 for the done-latch pattern.
     BuildResult buildAndCombiner(AstNodeExpr* lhsExpr, AstNodeExpr* rhsExpr,
-                                 int entryNode, FileLine* /*flp*/) {
+                                 int entryNode, FileLine* flp) {
         // Snapshot-restore m_inUnboundedScope around each sub-build so an
         // LHS liveness wait does not spuriously mark RHS nodes as unbounded
         // (and vice versa). The combiner inherits liveness only if at
@@ -603,6 +607,24 @@ class SvaNfaBuilder final {
         const bool rhsScope = m_inUnboundedScope;
         m_inUnboundedScope = savedScope || lhsScope || rhsScope;
         if (!lhs.valid() || !rhs.valid()) return BuildResult::fail();
+
+        // Both operands are single-cycle (termNode == entryNode): use a
+        // simple boolean AND.  The done-latch combiner incorrectly
+        // persists a previous cycle's result and would fire when the two
+        // operands were true on DIFFERENT cycles.
+        if (lhs.termNode == entryNode && rhs.termNode == entryNode) {
+            AstNodeExpr* condp = nullptr;
+            if (lhs.finalCondp && rhs.finalCondp) {
+                condp = new AstAnd{flp, lhs.finalCondp->cloneTreePure(false),
+                                   rhs.finalCondp->cloneTreePure(false)};
+                condp->dtypeSetBit();
+            } else if (lhs.finalCondp) {
+                condp = lhs.finalCondp;
+            } else {
+                condp = rhs.finalCondp;
+            }
+            return {entryNode, condp};
+        }
         // Range-delay mid-window sources in either sub-branch would need
         // to be folded into the latch's "accept-now" signal, which the
         // current combiner does not support. Defer (UNSUPPORTED).
@@ -638,26 +660,34 @@ class SvaNfaBuilder final {
         // liveness-only -- a liveness sub-sequence is never required to
         // terminate, so failing its boolean check is not a definitive
         // SAnd failure.
+        // Wire sub-sequence rejectOnFail only for multi-cycle sub-
+        // sequences (termNode != entryNode). For single-cycle boolean
+        // operands the termNode IS the entryNode (often the always-active
+        // start node), so a rejectOnFail Link would fire on every cycle
+        // where the boolean is false -- producing spurious rejects when
+        // the combiner is used as an antecedent (IEEE vacuous pass).
         if (!cn.isUnbounded) {
             bool needSink = false;
-            if (lhs.finalCondp
+            const bool lhsMultiCycle = (lhs.termNode != entryNode);
+            const bool rhsMultiCycle = (rhs.termNode != entryNode);
+            if (lhs.finalCondp && lhsMultiCycle
                 && !m_nfa.nodes[lhs.termNode].isUnbounded) {
                 needSink = true;
             }
-            if (rhs.finalCondp
+            if (rhs.finalCondp && rhsMultiCycle
                 && !m_nfa.nodes[rhs.termNode].isUnbounded) {
                 needSink = true;
             }
             if (needSink) {
                 const int sinkNode = m_nfa.createNode();
                 m_nfa.nodes[sinkNode].isRejectSink = true;
-                if (lhs.finalCondp
+                if (lhs.finalCondp && lhsMultiCycle
                     && !m_nfa.nodes[lhs.termNode].isUnbounded) {
                     m_nfa.addLink(lhs.termNode, sinkNode,
                                   sampled(lhs.finalCondp->cloneTreePure(false)));
                     m_nfa.edges.back().rejectOnFail = true;
                 }
-                if (rhs.finalCondp
+                if (rhs.finalCondp && rhsMultiCycle
                     && !m_nfa.nodes[rhs.termNode].isUnbounded) {
                     m_nfa.addLink(rhs.termNode, sinkNode,
                                   sampled(rhs.finalCondp->cloneTreePure(false)));
@@ -826,10 +856,15 @@ public:
     // Emit NFA as hardware. Two-phase: Links combinational, Edges registered.
     // acceptCondp = condition on the accept Link (from BuildResult::finalCondp).
     // Returns !reject expression for assert, or accept expression for cover.
+    // If outAcceptpp is non-null, the accept expression is stored there
+    // (caller must deleteTree when done). Used for standalone sequences
+    // with pass handlers to avoid vacuous-pass spurious firings.
     AstNodeExpr* emit(FileLine* flp, const SvaNfa& nfa,
                       AstNodeExpr* triggerExprp, AstSenTree* senTreep,
                       AstNodeExpr* acceptCondp, bool isCover,
-                      AstNodeExpr* disableExprp = nullptr) {
+                      AstNodeExpr* disableExprp = nullptr,
+                      bool negated = false,
+                      AstNodeExpr** outAcceptpp = nullptr) {
         const std::string baseName = m_names.get("");
         const int N = static_cast<int>(nfa.nodes.size());
 
@@ -1397,6 +1432,54 @@ public:
             disableExprp = nullptr;
         }
 
+        // Property negation (IEEE 1800-2023 16.12.1 `not`): invert
+        // accept/reject semantics.
+        // Assert(not P): pass when P fails -> return !accept.
+        // Cover(not P): fire when P fails -> return reject.
+        if (negated) {
+            if (isCover) {
+                // Negated cover: return reject signal (P failed)
+                if (terminalActivep) terminalActivep->deleteTree();
+                AstNodeExpr* negRejectp = nullptr;
+                if (acceptCondp && rejectBasep) {
+                    AstNodeExpr* const sampledCondp
+                        = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
+                    sampledCondp->dtypeFrom(acceptCondp);
+                    AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
+                    notCondp->dtypeSetBit();
+                    negRejectp = new AstAnd{flp, rejectBasep, notCondp};
+                    negRejectp->dtypeSetBit();
+                } else if (rejectBasep) {
+                    rejectBasep->deleteTree();
+                }
+                if (throughoutRejectp) {
+                    negRejectp = orExprs(flp, negRejectp, throughoutRejectp);
+                    if (negRejectp) negRejectp->dtypeSetBit();
+                }
+                if (requiredStepRejectp) {
+                    negRejectp = orExprs(flp, negRejectp, requiredStepRejectp);
+                    if (negRejectp) negRejectp->dtypeSetBit();
+                }
+                return negRejectp ? negRejectp
+                                  : new AstConst{flp, AstConst::BitFalse{}};
+            }
+            // Negated assert/assume: return !accept (fails when P matches)
+            AstNodeExpr* acceptp = terminalActivep;
+            if (acceptCondp) {
+                AstNodeExpr* const sampledCondp
+                    = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
+                sampledCondp->dtypeFrom(acceptCondp);
+                acceptp = new AstAnd{flp, acceptp, sampledCondp};
+                acceptp->dtypeSetBit();
+            }
+            if (throughoutRejectp) throughoutRejectp->deleteTree();
+            if (rejectBasep) rejectBasep->deleteTree();
+            if (requiredStepRejectp) requiredStepRejectp->deleteTree();
+            AstNodeExpr* const resultExprp = new AstNot{flp, acceptp};
+            resultExprp->dtypeSetBit();
+            return resultExprp;
+        }
+
         if (isCover) {
             // Cover property uses accept signal, not !reject. Reject-style
             // contributions are unused.
@@ -1431,7 +1514,19 @@ public:
         } else if (rejectBasep) {
             rejectBasep->deleteTree();
         }
-        if (terminalActivep) terminalActivep->deleteTree();  // cover branch exited earlier
+        // Optionally return accept expression for pass-handler gating.
+        if (outAcceptpp) {
+            AstNodeExpr* acceptExprp = terminalActivep->cloneTreePure(false);
+            if (acceptCondp) {
+                AstNodeExpr* const sp
+                    = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
+                sp->dtypeSetBit();
+                acceptExprp = new AstAnd{flp, acceptExprp, sp};
+                acceptExprp->dtypeSetBit();
+            }
+            *outAcceptpp = acceptExprp;
+        }
+        if (terminalActivep) terminalActivep->deleteTree();
 
         // OR in throughout-drop reject
         if (throughoutRejectp) {
@@ -1462,6 +1557,101 @@ public:
 class AssertNfaVisitor final : public VNVisitor {
     AstNodeModule* m_modp = nullptr;
     SvaNfaEmitter* m_emitterp = nullptr;
+    V3UniqueNames m_propVarNames{"__Vpropvar"};
+
+    // Extract AstPropSpec body from an AstProperty definition.
+    // Skips port AstVar and AstInitial* nodes at the front of stmtsp().
+    static AstPropSpec* getPropertyExprp(const AstProperty* propp) {
+        AstNode* propExprp = propp->stmtsp();
+        while (propExprp
+               && (VN_IS(propExprp, Var) || VN_IS(propExprp, InitialStaticStmt)
+                   || VN_IS(propExprp, InitialAutomaticStmt))) {
+            propExprp = propExprp->nextp();
+        }
+        return VN_CAST(propExprp, PropSpec);
+    }
+
+    // Inline a named property call (FuncRef -> Property) into the
+    // assertion's PropSpec. Mirrors V3AssertPre::substitutePropertyCall.
+    void inlineNamedProperty(AstPropSpec* outerSpecp, AstFuncRef* funcrefp,
+                             const AstProperty* propyp) {
+        AstPropSpec* propExprp = getPropertyExprp(propyp);
+        UASSERT_OBJ(propExprp, funcrefp, "Property has no body PropSpec");
+        propExprp = propExprp->cloneTree(false);
+
+        // Build substitution map for formal port parameters
+        const V3TaskConnects tconnects
+            = V3Task::taskConnects(funcrefp, propyp->stmtsp());
+        std::unordered_map<const AstVar*, AstNodeExpr*> portMap;
+        for (const auto& tconnect : tconnects) {
+            portMap[tconnect.first] = tconnect.second->exprp();
+        }
+
+        // Promote property-local variables (non-port Vars, IEEE 16.10) to
+        // module-level __Vpropvar temps.
+        std::unordered_map<const AstVar*, AstVar*> localVarMap;
+        for (AstNode* stmtp = propyp->stmtsp(); stmtp; stmtp = stmtp->nextp()) {
+            if (AstVar* const varp = VN_CAST(stmtp, Var)) {
+                if (!varp->isIO()) {
+                    const string newName = m_propVarNames.get(varp);
+                    AstVar* const newVarp = new AstVar{
+                        varp->fileline(), VVarType::MODULETEMP, newName,
+                        varp->dtypep()};
+                    newVarp->lifetime(VLifetime::STATIC_EXPLICIT);
+                    m_modp->addStmtsp(newVarp);
+                    localVarMap[varp] = newVarp;
+                }
+            }
+        }
+
+        // Single traversal: substitute ports and update local var refs
+        propExprp->foreach([&](AstVarRef* refp) {
+            {
+                const auto portIt = portMap.find(refp->varp());
+                if (portIt != portMap.end()) {
+                    refp->replaceWith(portIt->second->cloneTree(false));
+                    VL_DO_DANGLING(pushDeletep(refp), refp);
+                    return;
+                }
+            }
+            {
+                const auto localIt = localVarMap.find(refp->varp());
+                if (localIt != localVarMap.end()) { refp->varp(localIt->second); }
+            }
+        });
+
+        // Clean up argument expressions owned by FuncRef
+        for (const auto& tconnect : tconnects) {
+            pushDeletep(tconnect.second->exprp()->unlinkFrBack());
+        }
+
+        // Merge disable iff (IEEE 1800-2023 16.12.1)
+        if (outerSpecp->disablep() && propExprp->disablep()) {
+            outerSpecp->v3error("disable iff expression before property call "
+                                "and in its body is not legal");
+            pushDeletep(propExprp->disablep()->unlinkFrBack());
+        }
+        if (outerSpecp->disablep()) {
+            propExprp->disablep(outerSpecp->disablep()->unlinkFrBack());
+        }
+
+        // Merge clock events
+        if (outerSpecp->sensesp() && propExprp->sensesp()) {
+            outerSpecp->v3warn(
+                E_UNSUPPORTED,
+                "Unsupported: Clock event before property call and in its body");
+            pushDeletep(propExprp->sensesp()->unlinkFrBack());
+        }
+        if (outerSpecp->sensesp()) {
+            AstSenItem* const sensesp = outerSpecp->sensesp();
+            sensesp->unlinkFrBack();
+            propExprp->sensesp(sensesp);
+        }
+
+        // Replace outer PropSpec with inlined inner PropSpec
+        outerSpecp->replaceWith(propExprp);
+        VL_DO_DANGLING(pushDeletep(outerSpecp), outerSpecp);
+    }
 
     static bool hasMultiCycleExpr(const AstNode* nodep) {
         bool found = false;
@@ -1501,11 +1691,33 @@ class AssertNfaVisitor final : public VNVisitor {
 
     void processAssertion(AstNodeCoverOrAssert* assertp) {
         if (assertp->immediate()) return;
+
+        // Inline named property calls (FuncRef -> Property) so that
+        // hasMultiCycleExpr can see the property body.
+        if (AstPropSpec* const specp = VN_CAST(assertp->propp(), PropSpec)) {
+            if (AstFuncRef* const funcrefp = VN_CAST(specp->propp(), FuncRef)) {
+                if (const AstProperty* const propyp
+                    = VN_CAST(funcrefp->taskp(), Property)) {
+                    inlineNamedProperty(specp, funcrefp, propyp);
+                    // specp is now dangling -- re-read propp() below
+                }
+            }
+        }
+
         AstNode* const propp = assertp->propp();
         if (!hasMultiCycleExpr(propp)) return;
 
         const PropertyParts parts = decomposeProperty(propp);
         if (!parts.seqExprp) return;
+
+        // Unwrap property-level `not` (IEEE 1800-2023 16.12.1).
+        // Odd LogNot count -> negated semantics in emitter.
+        AstNodeExpr* seqBodyp = parts.seqExprp;
+        bool negated = false;
+        while (AstLogNot* const notp = VN_CAST(seqBodyp, LogNot)) {
+            negated = !negated;
+            seqBodyp = notp->lhsp();
+        }
 
         AstSenTree* senTreep = assertp->sentreep();
         bool senTreeOwned = false;  // True if we created senTreep locally
@@ -1567,12 +1779,12 @@ class AssertNfaVisitor final : public VNVisitor {
             builder.resetScope();
 
             if (parts.isOverlapped) {
-                result = builder.buildExpr(parts.seqExprp, trigNode,
+                result = builder.buildExpr(seqBodyp, trigNode,
                                            /*isTopLevelStep=*/true);
             } else {
                 const int delayNode = nfa.createNode();
                 nfa.addClockEdge(trigNode, delayNode);
-                result = builder.buildExpr(parts.seqExprp, delayNode,
+                result = builder.buildExpr(seqBodyp, delayNode,
                                            /*isTopLevelStep=*/true);
             }
 
@@ -1590,7 +1802,7 @@ class AssertNfaVisitor final : public VNVisitor {
             }
         } else {
             // Standalone sequence
-            result = builder.build(parts.seqExprp);
+            result = builder.build(seqBodyp);
             if (result.valid()) {
                 nfa.createAcceptNode();
                 nfa.addLink(result.termNode, nfa.acceptNode);
@@ -1611,17 +1823,42 @@ class AssertNfaVisitor final : public VNVisitor {
             return;
         }
 
+        // For standalone sequences (no implication) with pass handlers,
+        // request the accept expression so we can gate the pass handler.
+        // Without this, `!reject == 1` on non-terminal cycles causes
+        // vacuous-pass firings that don't occur in Questa.
+        AstAssert* const assertAssertp = VN_CAST(assertp, Assert);
+        const bool needAccept = !isCover && !parts.hasImplication
+                                && assertAssertp && assertAssertp->passsp();
+        AstNodeExpr* acceptExprp = nullptr;
+
         // Emit NFA hardware
         AstNodeExpr* const alwaysTriggerp = new AstConst{flp, AstConst::BitTrue{}};
         AstNodeExpr* const outputExprp
             = m_emitterp->emit(flp, nfa, alwaysTriggerp, senTreep,
                                result.finalCondp, isCover,
                                disableExprp ? disableExprp->cloneTreePure(false)
-                                            : nullptr);
+                                            : nullptr,
+                               negated,
+                               needAccept ? &acceptExprp : nullptr);
 
         // Clean up locally-owned temporaries (emit cloned them)
         alwaysTriggerp->deleteTree();
         if (senTreeOwned) senTreep->deleteTree();
+
+        // Gate pass handler with accept signal to avoid vacuous-pass
+        // firings on non-terminal cycles (standalone sequences only).
+        if (needAccept && acceptExprp) {
+            AstNode* passsp = assertAssertp->passsp();
+            if (passsp) {
+                passsp->unlinkFrBackWithNext();
+                AstIf* const gateIfp
+                    = new AstIf{flp, acceptExprp, passsp, nullptr};
+                assertAssertp->addPasssp(gateIfp);
+            } else {
+                acceptExprp->deleteTree();
+            }
+        }
 
         // Replace inner property with output expression
         if (propSpecp) {
@@ -1650,6 +1887,11 @@ class AssertNfaVisitor final : public VNVisitor {
     }
     void visit(AstAssert* nodep) override { processAssertion(nodep); }
     void visit(AstCover* nodep) override { processAssertion(nodep); }
+    void visit(AstRestrict* nodep) override {
+        // Restrict property is ignored by simulators (IEEE 1800-2023 16.12.2).
+        // Remove here so temporal SExpr don't leak to V3AssertPre.
+        VL_DO_DANGLING(pushDeletep(nodep->unlinkFrBack()), nodep);
+    }
     void visit(AstAssertIntrinsic* nodep) override {}
     void visit(AstNode* nodep) override { iterateChildren(nodep); }
 

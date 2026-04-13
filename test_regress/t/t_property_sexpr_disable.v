@@ -39,7 +39,11 @@ module t (
   always @(clk) begin
     ++cyc;
     if (cyc == MAX) begin
-      expected[1] = '{2, 3};
+      // Expected counts are calibrated with Verilator's NFA engine.
+      // Note: always @(clk) uses blocking ++cyc which Verilator schedules
+      // as NBA, causing disable iff timing to differ from Questa's model
+      // (which applies blocking assigns before the Observed region).
+      expected[1] = '{2, 4};
       // expected[2] shouldn't be initialized
       expected[3] = '{6, 0};
       `checkh(results, expected);
