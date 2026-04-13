@@ -133,7 +133,9 @@ struct SvaNfa final {
 
     int createNode() {
         const int id = static_cast<int>(nodes.size());
-        nodes.push_back(SvaNfaNode{id, false, false});
+        SvaNfaNode node;
+        node.id = id;
+        nodes.push_back(std::move(node));
         return id;
     }
     int createAcceptNode() {
@@ -544,7 +546,7 @@ class SvaNfaBuilder final {
             currentNode = mergeNode;
         }
         // finalCond = nullptr (already checked via Links)
-        return {currentNode, nullptr};
+        return {currentNode, nullptr, {}};
     }
 
     BuildResult buildGotoRep(AstSGotoRep* repp, int entryNode) {
@@ -574,7 +576,7 @@ class SvaNfaBuilder final {
         // `[->N]` waits unboundedly for each match -- liveness terminal.
         m_nfa.nodes[currentNode].isUnbounded = true;
         m_inUnboundedScope = true;
-        return {currentNode, nullptr};
+        return {currentNode, nullptr, {}};
     }
 
     // Shared sub-routine for SAnd and (lowered) SIntersect: build two
@@ -610,7 +612,7 @@ class SvaNfaBuilder final {
             } else {
                 condp = rhs.finalCondp;
             }
-            return {entryNode, condp};
+            return {entryNode, condp, {}};
         }
         // Range-delay mid-window sources in either sub-branch would need
         // to be folded into the latch's "accept-now" signal, which the
@@ -671,7 +673,7 @@ class SvaNfaBuilder final {
                 }
             }
         }
-        return {combNode, nullptr};
+        return {combNode, nullptr, {}};
     }
 
     BuildResult buildThroughout(AstSThroughout* nodep, int entryNode) {
@@ -747,7 +749,7 @@ public:
             } else {
                 guardedLink(rhs.termNode, mergeNode, flp);
             }
-            return {mergeNode, nullptr};
+            return {mergeNode, nullptr, {}};
         }
         if (AstLogOr* const orp = VN_CAST(nodep, LogOr)) {
             FileLine* const flp = orp->fileline();
@@ -767,7 +769,7 @@ public:
             } else {
                 guardedLink(rhs.termNode, mergeNode, flp);
             }
-            return {mergeNode, nullptr};
+            return {mergeNode, nullptr, {}};
         }
         if (AstSAnd* const andp = VN_CAST(nodep, SAnd)) {
             return buildAndCombiner(andp->lhsp(), andp->rhsp(), entryNode, andp->fileline());
@@ -787,10 +789,10 @@ public:
         }
         if (VN_IS(nodep, LogAnd)) {
             // Boolean AND: treat as leaf with the whole expr as finalCond
-            return {entryNode, nodep};
+            return {entryNode, nodep, {}};
         }
         // Default: boolean leaf -- return as finalCond
-        return {entryNode, nodep};
+        return {entryNode, nodep, {}};
     }
 
     // Build complete NFA for a standalone sequence.
@@ -831,10 +833,20 @@ public:
     // If outAcceptpp is non-null, the accept expression is stored there
     // (caller must deleteTree when done). Used for standalone sequences
     // with pass handlers to avoid vacuous-pass spurious firings.
+    // disableCntVarp / snapshotVarp: when non-null, use the IEEE-correct
+    // disableCnt snapshot mechanism instead of the direct !disable gate on
+    // state register NBAs. The disableCnt counter increments on the rising
+    // edge of the disable expression, and snapshotVarp captures the counter
+    // value at each evaluation start (in Phase 2 NBA). The terminal check
+    // then gates on (snapshot == disableCnt) to detect whether disable
+    // fired during the evaluation. Required for non-constant disable iff
+    // with standalone sequences where the direct !disable gate misses the
+    // disable cycle due to Verilator's NBA scheduling.
     AstNodeExpr* emit(FileLine* flp, const SvaNfa& nfa, AstNodeExpr* triggerExprp,
                       AstSenTree* senTreep, AstNodeExpr* acceptCondp, bool isCover,
                       AstNodeExpr* disableExprp = nullptr, bool negated = false,
-                      AstNodeExpr** outAcceptpp = nullptr) {
+                      AstNodeExpr** outAcceptpp = nullptr,
+                      AstVar* disableCntVarp = nullptr, AstVar* snapshotVarp = nullptr) {
         const std::string baseName = m_names.get("");
         const int N = static_cast<int>(nfa.nodes.size());
 
@@ -1018,7 +1030,10 @@ public:
                 AstNodeExpr* srcSig = stateSig[edge.fromId]->cloneTreePure(false);
                 srcSig = andCond(flp, srcSig, edge.condp);
 
-                if (disableExprp) {
+                // Gate state register NBA with !disable unless the snapshot
+                // mechanism is active (which handles disable iff timing
+                // correctly via disableCnt comparison at the terminal).
+                if (disableExprp && !snapshotVarp) {
                     AstNodeExpr* const notDisp
                         = new AstNot{flp, disableExprp->cloneTreePure(false)};
                     notDisp->dtypeSetBit();
@@ -1040,6 +1055,19 @@ public:
         }
 
         if (bodyp) {
+            // If using the snapshot mechanism, capture the disableCnt at
+            // each posedge in the same Phase-2 always block. This captures
+            // the counter BEFORE any reactive re-evaluation triggered by
+            // signal changes in this clock's NBA round (e.g., ++cyc in
+            // always @(clk) updating the disable expression). The terminal
+            // check then compares snapshotVarp vs disableCntVarp to decide
+            // whether disable fired during the evaluation.
+            if (snapshotVarp && disableCntVarp) {
+                AstAssignDly* const snapAssignp = new AstAssignDly{
+                    flp, new AstVarRef{flp, snapshotVarp, VAccess::WRITE},
+                    new AstVarRef{flp, disableCntVarp, VAccess::READ}};
+                bodyp->addNext(snapAssignp);
+            }
             AstAlways* const alwaysp
                 = new AstAlways{flp, VAlwaysKwd::ALWAYS, senTreep->cloneTree(false), bodyp};
             m_modp->addStmtsp(alwaysp);
@@ -1213,6 +1241,15 @@ public:
         // terminalActivep: for accept/cover (any source contributes).
         // rejectBasep:     for reject (counter sources contribute only at
         //                  window end, not every in-window cycle).
+        // Snapshot-based not-disabled expression: (snapshotVarp == disableCntVarp).
+        // Built once and cloned into each terminal contribution.
+        AstNodeExpr* snapshotOkp = nullptr;
+        if (snapshotVarp && disableCntVarp) {
+            snapshotOkp = new AstEq{flp, new AstVarRef{flp, snapshotVarp, VAccess::READ},
+                                    new AstVarRef{flp, disableCntVarp, VAccess::READ}};
+            snapshotOkp->dtypeSetBit();
+        }
+
         AstNodeExpr* terminalActivep = nullptr;
         AstNodeExpr* rejectBasep = nullptr;
         for (const auto& edge : nfa.edges) {
@@ -1222,6 +1259,11 @@ public:
 
             AstNodeExpr* srcSig = stateSig[edge.fromId]->cloneTreePure(false);
             srcSig = andCond(flp, srcSig, edge.condp);
+            // Gate terminal contribution with snapshot check if active.
+            if (snapshotOkp) {
+                srcSig = new AstAnd{flp, srcSig, snapshotOkp->cloneTreePure(false)};
+                srcSig->dtypeSetBit();
+            }
 
             if (nfa.nodes[edge.fromId].isCounter) {
                 const int ci = edge.fromId;
@@ -1353,6 +1395,12 @@ public:
             }
         }
 
+        // Clean up snapshotOkp template expression (was cloned per-use)
+        if (snapshotOkp) {
+            snapshotOkp->deleteTree();
+            snapshotOkp = nullptr;
+        }
+
         // Clean up disableExprp if passed (was cloned in Phase 2, original not attached)
         if (disableExprp) {
             disableExprp->deleteTree();
@@ -1482,6 +1530,7 @@ class AssertNfaVisitor final : public VNVisitor {
     AstNodeModule* m_modp = nullptr;
     SvaNfaEmitter* m_emitterp = nullptr;
     V3UniqueNames m_propVarNames{"__Vpropvar"};
+    V3UniqueNames m_disableCntNames{"__VnfaDis"};
 
     // Extract AstPropSpec body from an AstProperty definition.
     // Skips port AstVar and AstInitial* nodes at the front of stmtsp().
@@ -1654,6 +1703,71 @@ class AssertNfaVisitor final : public VNVisitor {
         FileLine* const flp = assertp->fileline();
         const bool isCover = VN_IS(assertp, Cover);
 
+        // For standalone sequences with a non-constant disable iff, use the
+        // IEEE-correct disableCnt snapshot mechanism instead of the direct
+        // !disable gate on state NBAs. The !disable gate misses the disable
+        // cycle when the disable expression depends on variables updated via
+        // NBA (e.g. `always @(clk) ++cyc`) because the NFA's state registers
+        // are also updated in the NBA region (before the reactive re-evaluation
+        // that would capture the updated disable value).
+        //
+        // The disableCnt mechanism: a counter increments on the rising edge of
+        // the disable expression (in a reactive re-evaluation triggered after
+        // NBA updates). A snapshot register captures the counter value at each
+        // evaluation start (in Phase-2 NBA, before the reactive increment).
+        // The terminal check compares snapshot vs counter: if they differ,
+        // disable fired during the evaluation => kill it.
+        AstVar* disableCntVarp = nullptr;
+        AstVar* snapshotVarp = nullptr;
+        // Detect $sampled inside the disable expression: cannot use @(posedge
+        // disableExpr) as a sensitivity if disableExpr contains $sampled.
+        // Fall back to the basic !disable gate for such cases.
+        const bool disableHasSampled = disableExprp
+            && disableExprp->exists([](const AstSampled*) { return true; });
+        if (disableExprp && !parts.hasImplication && !VN_IS(disableExprp, Const)
+            && !disableHasSampled) {
+            AstNodeDType* const u32DTypep = m_modp->findBasicDType(VBasicDTypeKwd::UINT32);
+            const std::string cntName = m_disableCntNames.get("");
+            disableCntVarp = new AstVar{flp, VVarType::MODULETEMP, cntName, u32DTypep};
+            disableCntVarp->lifetime(VLifetime::STATIC_EXPLICIT);
+            m_modp->addStmtsp(disableCntVarp);
+
+            // always @(posedge disableExpr) disableCnt++
+            AstNodeExpr* const rdRefp
+                = new AstVarRef{flp, disableCntVarp, VAccess::READ};
+            AstNodeExpr* const wrRefp
+                = new AstVarRef{flp, disableCntVarp, VAccess::WRITE};
+            AstNodeExpr* const incrExprp = new AstAdd{flp, rdRefp,
+                new AstConst{flp, AstConst::WidthedValue{}, 32, 1u}};
+            incrExprp->dtypeFrom(disableCntVarp);
+            AstAssign* const incrAssignp = new AstAssign{flp, wrRefp, incrExprp};
+            AstSenItem* const senItemp = new AstSenItem{
+                flp, VEdgeType::ET_POSEDGE, disableExprp->cloneTreePure(false)};
+            AstSenTree* const disSenp = new AstSenTree{flp, senItemp};
+            AstAlways* const disAlwaysp
+                = new AstAlways{flp, VAlwaysKwd::ALWAYS, disSenp, incrAssignp};
+            m_modp->addStmtsp(disAlwaysp);
+
+            // Create snapshot register (captured in Phase-2 NBA alongside
+            // state register updates, before any reactive re-evaluation)
+            const std::string snapName = m_disableCntNames.get("") + "__snap";
+            snapshotVarp = new AstVar{flp, VVarType::MODULETEMP, snapName, u32DTypep};
+            snapshotVarp->lifetime(VLifetime::STATIC_EXPLICIT);
+            m_modp->addStmtsp(snapshotVarp);
+
+            // Remove propSpec disable so V3Assert doesn't add its own !disable
+            // wrapper (which uses the active-region value and would be wrong).
+            // The snapshot mechanism handles disable semantics instead.
+            if (propSpecp && propSpecp->disablep()) {
+                AstNodeExpr* const oldDisp = propSpecp->disablep();
+                oldDisp->unlinkFrBack();
+                // Keep disableExprp pointing to the original expression (now
+                // unlinked); it is used by emit() as a template to clone from
+                // for other gates (Phase 2b, 2c, 3a, 3b). The caller (emit)
+                // will deleteTree() it.
+            }
+        }
+
         // Build NFA
         SvaNfa nfa;
         SvaNfaBuilder builder{nfa};
@@ -1752,7 +1866,8 @@ class AssertNfaVisitor final : public VNVisitor {
         AstNodeExpr* const outputExprp
             = m_emitterp->emit(flp, nfa, alwaysTriggerp, senTreep, result.finalCondp, isCover,
                                disableExprp ? disableExprp->cloneTreePure(false) : nullptr,
-                               negated, needAccept ? &acceptExprp : nullptr);
+                               negated, needAccept ? &acceptExprp : nullptr,
+                               disableCntVarp, snapshotVarp);
 
         // Clean up locally-owned temporaries (emit cloned them)
         alwaysTriggerp->deleteTree();
