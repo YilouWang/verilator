@@ -424,8 +424,8 @@ private:
         if (!constp) {
             // V3AssertNfa handles non-const delays before this pass and
             // replaces the property; this branch should never be reached.
-            nodep->v3fatal("Non-constant cycle delay in assertion: "
-                           "should have been caught by V3AssertNfa");
+            nodep->v3fatalSrc("Non-constant cycle delay in assertion: "
+                              "should have been caught by V3AssertNfa");
         } else if (constp->isZero()) {
             VL_DO_DANGLING(pushDeletep(valuep), valuep);
             if (m_inSynchDrive) {

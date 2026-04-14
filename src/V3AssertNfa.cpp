@@ -486,7 +486,8 @@ class SvaNfaBuilder final {
         // which produces invalid AST and silently broken assertions.
         AstNodeExpr* const exprp = sexprp->exprp();
         if (VN_IS(exprp, SExpr) || VN_IS(exprp, SAnd) || VN_IS(exprp, SOr) || VN_IS(exprp, SConsRep)
-            || VN_IS(exprp, SGotoRep) || VN_IS(exprp, SThroughout) || VN_IS(exprp, SIntersect)) {
+            || VN_IS(exprp, SGotoRep) || VN_IS(exprp, SThroughout) || VN_IS(exprp, SIntersect)
+            || VN_IS(exprp, SNonConsRep)) {
             // rangeMidSources should be empty here because the chain path
             // is only taken for pure-boolean RHS.
             return buildExpr(exprp, currentNode);
@@ -814,8 +815,20 @@ public:
             const int lhsLen = fixedLength(intp->lhsp());
             const int rhsLen = fixedLength(intp->rhsp());
             if (lhsLen < 0 || rhsLen < 0) return BuildResult::fail();
-            if (lhsLen != rhsLen) return BuildResult::fail();
+            if (lhsLen != rhsLen) {
+                intp->v3warn(WIDTHTRUNC,
+                             "Intersect sequence length mismatch: left "
+                                 + std::to_string(lhsLen) + " cycles, right "
+                                 + std::to_string(rhsLen)
+                                 + " cycles (IEEE 1800-2023 16.9.6)");
+                return BuildResult::failWithError();
+            }
             return buildAndCombiner(intp->lhsp(), intp->rhsp(), entryNode, intp->fileline());
+        }
+        if (VN_IS(nodep, SNonConsRep)) {
+            // Nonconsecutive repetition [=N] is not yet implemented in the
+            // NFA engine. Return fail so the caller emits UNSUPPORTED.
+            return BuildResult::fail();
         }
         if (VN_IS(nodep, LogAnd)) {
             // Boolean AND: treat as leaf with the whole expr as finalCond
@@ -1717,6 +1730,7 @@ class AssertNfaVisitor final : public VNVisitor {
         if (!found) nodep->foreach([&found](const AstSThroughout*) { found = true; });
         if (!found) nodep->foreach([&found](const AstSAnd*) { found = true; });
         if (!found) nodep->foreach([&found](const AstSOr*) { found = true; });
+        if (!found) nodep->foreach([&found](const AstSNonConsRep*) { found = true; });
         return found;
     }
 
