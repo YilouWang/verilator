@@ -9,6 +9,9 @@ module t (input clk);
 
   // === Consecutive repetition [*N] unsupported forms ===
 
+  // Unsupported: exact repetition count > 256 (NFA node-chain limit)
+  assert property (@(posedge clk) a [* 10000] |-> b);
+
   // Unsupported: non-##1 inter-repetition delay
   assert property (@(posedge clk) a [*2] ##3 b);
 

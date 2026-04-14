@@ -11,6 +11,8 @@ import vltest_bootstrap
 
 test.scenarios('linter')
 
-test.compile(verilator_flags2=['--assert --timing'])
+test.lint(expect_filename=test.golden_filename,
+          verilator_flags2=['--assert --timing --error-limit 1000'],
+          fails=True)
 
 test.passes()

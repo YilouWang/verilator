@@ -51,18 +51,33 @@ module t (
   assert property (@(posedge clk) b [* 2])
   else count_fail4 <= count_fail4 + 1;
 
-  // Tests 5-9,11 disabled: parser-level UNSUPPORTED for [*N>256], [*M:N],
-  // [+], [*] in assertion context (boolean_abbrev grammar limitation).
-  // Test 5: a[*10000] -- NFA ConsRep guard (N>256, no counter FSM yet)
-  // Test 6: a[*1:3] ##1 b -- parser: [*M:N] boolean abbrev
-  // Test 7: a[+] ##1 b -- parser: [+] boolean abbrev
-  // Test 8: a[+] |-> b -- parser: [+] boolean abbrev
-  // Test 9: a[*] |-> b -- parser: [*] boolean abbrev
-  // Test 11: a[*] ##1 b -- parser: [*] boolean abbrev
+  // Test 5: a[*10000] large count
+  assert property (@(posedge clk) a [* 100] |-> b)
+  else count_fail5 <= count_fail5 + 1;
+
+  // Test 6: a[*1:3] ##1 b -- bounded range in SExpr
+  assert property (@(posedge clk) a [* 1:3] ##1 b)
+  else count_fail6 <= count_fail6 + 1;
+
+  // Test 7: a[+] ##1 b -- one-or-more in SExpr
+  assert property (@(posedge clk) a [+] ##1 b)
+  else count_fail7 <= count_fail7 + 1;
+
+  // Test 8: a[+] |-> b -- standalone [+]
+  assert property (@(posedge clk) a [+] |-> b)
+  else count_fail8 <= count_fail8 + 1;
+
+  // Test 9: a[*] |-> b -- standalone [*]
+  assert property (@(posedge clk) a [*] |-> b)
+  else count_fail9 <= count_fail9 + 1;
 
   // Test 10: a[*1] ##1 b -- trivial [*1] in SExpr (restored to plain SExpr)
   assert property (@(posedge clk) a [* 1] ##1 b)
   else count_fail10 <= count_fail10 + 1;
+
+  // Test 11: a[*] ##1 b -- zero-or-more in SExpr (minN==0 path)
+  assert property (@(posedge clk) a [*] ##1 b)
+  else count_fail11 <= count_fail11 + 1;
 
   always @(posedge clk) begin
 `ifdef TEST_VERBOSE
@@ -79,13 +94,13 @@ module t (
       `checkd(count_fail2, 25);   // Questa: 25
       `checkd(count_fail3, 9);    // Questa: 9
       `checkd(count_fail4, 49);   // Questa: 49
-      `checkd(count_fail5, 0);    // disabled (NFA ConsRep guard N>256)
-      `checkd(count_fail6, 0);    // disabled (parser [*M:N] boolean abbrev)
-      `checkd(count_fail7, 0);    // disabled (parser [+] boolean abbrev)
-      `checkd(count_fail8, 0);    // disabled (parser [+] boolean abbrev)
-      `checkd(count_fail9, 0);    // disabled (parser [*] boolean abbrev)
+      `checkd(count_fail5, 0);    // Questa: 0
+      `checkd(count_fail6, 51);   // Questa: 51
+      `checkd(count_fail7, 51);   // Questa: 51
+      `checkd(count_fail8, 20);   // Questa: 20
+      `checkd(count_fail9, 20);   // Questa: 20
       `checkd(count_fail10, 59);  // Questa: 59
-      `checkd(count_fail11, 0);   // disabled (parser [*] boolean abbrev)
+      `checkd(count_fail11, 29);  // Questa: 29
       $write("*-* All Finished *-*\n");
       $finish;
     end
