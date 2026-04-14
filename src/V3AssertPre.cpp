@@ -422,8 +422,10 @@ private:
         AstNodeExpr* valuep = V3Const::constifyEdit(nodep->lhsp()->unlinkFrBack());
         const AstConst* const constp = VN_CAST(valuep, Const);
         if (!constp) {
-            nodep->v3error(
-                "Delay value is not an elaboration-time constant (IEEE 1800-2023 16.7)");
+            // V3AssertNfa handles non-const delays before this pass and
+            // replaces the property; this branch should never be reached.
+            nodep->v3fatal("Non-constant cycle delay in assertion: "
+                           "should have been caught by V3AssertNfa");
         } else if (constp->isZero()) {
             VL_DO_DANGLING(pushDeletep(valuep), valuep);
             if (m_inSynchDrive) {
