@@ -485,9 +485,9 @@ class SvaNfaBuilder final {
         // would try to use the multi-cycle subtree as a sampled boolean,
         // which produces invalid AST and silently broken assertions.
         AstNodeExpr* const exprp = sexprp->exprp();
-        if (VN_IS(exprp, SExpr) || VN_IS(exprp, SAnd) || VN_IS(exprp, SOr) || VN_IS(exprp, SConsRep)
-            || VN_IS(exprp, SGotoRep) || VN_IS(exprp, SThroughout) || VN_IS(exprp, SIntersect)
-            || VN_IS(exprp, SNonConsRep)) {
+        if (VN_IS(exprp, SExpr) || VN_IS(exprp, SAnd) || VN_IS(exprp, SOr)
+            || VN_IS(exprp, SConsRep) || VN_IS(exprp, SGotoRep) || VN_IS(exprp, SThroughout)
+            || VN_IS(exprp, SIntersect) || VN_IS(exprp, SNonConsRep)) {
             // rangeMidSources should be empty here because the chain path
             // is only taken for pure-boolean RHS.
             return buildExpr(exprp, currentNode);
@@ -816,11 +816,10 @@ public:
             const int rhsLen = fixedLength(intp->rhsp());
             if (lhsLen < 0 || rhsLen < 0) return BuildResult::fail();
             if (lhsLen != rhsLen) {
-                intp->v3warn(WIDTHTRUNC,
-                             "Intersect sequence length mismatch: left "
-                                 + std::to_string(lhsLen) + " cycles, right "
-                                 + std::to_string(rhsLen)
-                                 + " cycles (IEEE 1800-2023 16.9.6)");
+                intp->v3warn(WIDTHTRUNC, "Intersect sequence length mismatch: left "
+                                             + std::to_string(lhsLen) + " cycles, right "
+                                             + std::to_string(rhsLen)
+                                             + " cycles (IEEE 1800-2023 16.9.6)");
                 return BuildResult::failWithError();
             }
             return buildAndCombiner(intp->lhsp(), intp->rhsp(), entryNode, intp->fileline());
@@ -1888,10 +1887,8 @@ class AssertNfaVisitor final : public VNVisitor {
             const BuildResult antResult = builder.buildExpr(parts.triggerExprp, nfa.startNode);
             if (!antResult.valid()) {
                 if (!antResult.errorEmitted) {
-                    assertp->v3warn(
-                        E_UNSUPPORTED,
-                        "Unsupported: assertion antecedent contains SVA"
-                        " construct not yet supported by NFA engine");
+                    assertp->v3warn(E_UNSUPPORTED, "Unsupported: assertion antecedent contains SVA"
+                                                   " construct not yet supported by NFA engine");
                 }
                 if (senTreeOwned) senTreep->deleteTree();
                 if (disableExprUnlinked) disableExprp->deleteTree();
