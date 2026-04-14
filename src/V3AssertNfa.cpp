@@ -57,8 +57,8 @@ struct SvaNfaNode final {
     // cycle in [0, counterRange]. Used by `##[M:N]` when N-M exceeds the
     // register-chain threshold; the M-cycle prefix is still handled by a
     // regular delay chain. Non-overlapping (single attempt in flight) --
-    // acceptable tradeoff per spec 3.2.1, since the alternative (one register
-    // per cycle) explodes for large N-M.
+    // acceptable tradeoff per IEEE 1800-2023 16.9.2, since the alternative
+    // (one register per cycle) explodes for large N-M.
     bool isCounter = false;
     int counterMin = 0;  // Start of [min,max] match window
     int counterMax = 0;  // Inclusive end of window; reject fires here
@@ -104,7 +104,6 @@ struct SvaNfaEdge final {
 struct SvaNfa final {
     int startNode = -1;
     int acceptNode = -1;
-    int rejectNode = -1;
     std::vector<SvaNfaNode> nodes;
     std::vector<SvaNfaEdge> edges;
 
@@ -142,12 +141,6 @@ struct SvaNfa final {
         const int id = createNode();
         nodes[id].isAccept = true;
         acceptNode = id;
-        return id;
-    }
-    int createRejectNode() {
-        const int id = createNode();
-        nodes[id].isReject = true;
-        rejectNode = id;
         return id;
     }
     void addClockEdge(int from, int to, AstNodeExpr* condp = nullptr) {
@@ -195,8 +188,8 @@ class SvaNfaBuilder final {
     // terminal is still "reachable only via a liveness path".
     bool m_inUnboundedScope = false;
 
-    AstNodeExpr* throughoutCond(AstNodeExpr* baseCond, FileLine* flp) {
-        if (m_throughoutStack.empty()) return baseCond;
+    AstNodeExpr* throughoutCond(AstNodeExpr* baseCondp, FileLine* flp) {
+        if (m_throughoutStack.empty()) return baseCondp;
         // AND all throughout conditions (supports nesting)
         // Each must use $sampled values per IEEE 16.9.9
         AstNodeExpr* guardp = nullptr;
@@ -209,8 +202,8 @@ class SvaNfaBuilder final {
                 guardp->dtypeSetBit();
             }
         }
-        if (baseCond) {
-            guardp = new AstAnd{flp, baseCond, guardp};
+        if (baseCondp) {
+            guardp = new AstAnd{flp, baseCondp, guardp};
             guardp->dtypeSetBit();
         }
         return guardp;
@@ -606,18 +599,18 @@ class SvaNfaBuilder final {
 
     // Shared sub-routine for SAnd and (lowered) SIntersect: build two
     // disjoint sub-NFAs from the same entry node and aggregate via a
-    // done-latch combiner. See spec 3.6 for the done-latch pattern.
-    BuildResult buildAndCombiner(AstNodeExpr* lhsExpr, AstNodeExpr* rhsExpr, int entryNode,
+    // done-latch combiner (IEEE 1800-2023 16.9.5).
+    BuildResult buildAndCombiner(AstNodeExpr* lhsExprp, AstNodeExpr* rhsExprp, int entryNode,
                                  FileLine* flp) {
         // Snapshot-restore m_inUnboundedScope around each sub-build so an
         // LHS liveness wait does not spuriously mark RHS nodes as unbounded
         // (and vice versa). The combiner inherits liveness only if at
         // least one side's terminal is unbounded.
         const bool savedScope = m_inUnboundedScope;
-        const BuildResult lhs = buildExpr(lhsExpr, entryNode);
+        const BuildResult lhs = buildExpr(lhsExprp, entryNode);
         const bool lhsScope = m_inUnboundedScope;
         m_inUnboundedScope = savedScope;
-        const BuildResult rhs = buildExpr(rhsExpr, entryNode);
+        const BuildResult rhs = buildExpr(rhsExprp, entryNode);
         const bool rhsScope = m_inUnboundedScope;
         m_inUnboundedScope = savedScope || lhsScope || rhsScope;
         if (!lhs.valid() || !rhs.valid()) {
@@ -811,7 +804,7 @@ public:
             // statically-fixed equal-length sub-sequences this is identical
             // to SAnd because both terminate at the same cycle. Variable
             // length intersect requires per-attempt cycle counters
-            // (spec 3.7) which is left for a follow-up.
+            // (IEEE 1800-2023 16.9.6) which is left for a follow-up.
             const int lhsLen = fixedLength(intp->lhsp());
             const int rhsLen = fixedLength(intp->rhsp());
             if (lhsLen < 0 || rhsLen < 0) return BuildResult::fail();
@@ -853,16 +846,16 @@ class SvaNfaEmitter final {
 
     static AstNodeExpr* andCond(FileLine* flp, AstNodeExpr* exprp, AstNodeExpr* condp) {
         if (!condp) return exprp;
-        AstNodeExpr* const result = new AstAnd{flp, exprp, condp->cloneTreePure(false)};
-        result->dtypeSetBit();
-        return result;
+        AstNodeExpr* const resultp = new AstAnd{flp, exprp, condp->cloneTreePure(false)};
+        resultp->dtypeSetBit();
+        return resultp;
     }
-    static AstNodeExpr* orExprs(FileLine* flp, AstNodeExpr* a, AstNodeExpr* b) {
-        if (!a) return b;
-        if (!b) return a;
-        AstNodeExpr* const result = new AstOr{flp, a, b};
-        result->dtypeSetBit();
-        return result;
+    static AstNodeExpr* orExprs(FileLine* flp, AstNodeExpr* ap, AstNodeExpr* bp) {
+        if (!ap) return bp;
+        if (!bp) return ap;
+        AstNodeExpr* const resultp = new AstOr{flp, ap, bp};
+        resultp->dtypeSetBit();
+        return resultp;
     }
 
 public:
@@ -895,7 +888,7 @@ public:
         // Identify registered nodes (targets of Edges)
         std::vector<bool> needsReg(N, false);
         for (const auto& edge : nfa.edges) {
-            if (edge.consumesCycle && edge.toId != nfa.acceptNode && edge.toId != nfa.rejectNode
+            if (edge.consumesCycle && edge.toId != nfa.acceptNode
                 && !nfa.nodes[edge.toId].isRejectSink) {
                 needsReg[edge.toId] = true;
             }
@@ -911,7 +904,7 @@ public:
         // SAnd combiner: per-combiner done-latch register pair.
         std::vector<AstVar*> doneLVars(N, nullptr);
         std::vector<AstVar*> doneRVars(N, nullptr);
-        AstNodeDType* const u32DType = m_modp->findBasicDType(VBasicDTypeKwd::UINT32);
+        AstNodeDType* const u32DTypep = m_modp->findBasicDType(VBasicDTypeKwd::UINT32);
         for (int i = 0; i < N; ++i) {
             if (nfa.nodes[i].isAndCombiner) {
                 const std::string base = baseName + "__a" + std::to_string(i);
@@ -935,7 +928,7 @@ public:
                 m_modp->addStmtsp(activep);
                 counterActiveVars[i] = activep;
                 AstVar* const cntp
-                    = new AstVar{flp, VVarType::MODULETEMP, base + "_cnt", u32DType};
+                    = new AstVar{flp, VVarType::MODULETEMP, base + "_cnt", u32DTypep};
                 cntp->lifetime(VLifetime::STATIC_EXPLICIT);
                 m_modp->addStmtsp(cntp);
                 counterCountVars[i] = cntp;
@@ -1011,20 +1004,20 @@ public:
                 if (l < 0 || r < 0) continue;
                 if (!stateSig[l] || !stateSig[r]) continue;
 
-                AstNodeExpr* const acceptLforOr = buildAcceptNow(stateSig[l], node.andLhsCondp);
-                AstNodeExpr* const acceptRforOr = buildAcceptNow(stateSig[r], node.andRhsCondp);
-                AstNodeExpr* const acceptLforOne = buildAcceptNow(stateSig[l], node.andLhsCondp);
-                AstNodeExpr* const acceptRforOne = buildAcceptNow(stateSig[r], node.andRhsCondp);
+                AstNodeExpr* const acceptLforOrp = buildAcceptNow(stateSig[l], node.andLhsCondp);
+                AstNodeExpr* const acceptRforOrp = buildAcceptNow(stateSig[r], node.andRhsCondp);
+                AstNodeExpr* const acceptLforOnep = buildAcceptNow(stateSig[l], node.andLhsCondp);
+                AstNodeExpr* const acceptRforOnep = buildAcceptNow(stateSig[r], node.andRhsCondp);
 
                 AstNodeExpr* const doneLRefp = new AstVarRef{flp, doneLVars[i], VAccess::READ};
-                AstNodeExpr* const doneROrp = new AstOr{flp, doneLRefp, acceptLforOr};
-                doneROrp->dtypeSetBit();
+                AstNodeExpr* const doneLOrp = new AstOr{flp, doneLRefp, acceptLforOrp};
+                doneLOrp->dtypeSetBit();
                 AstNodeExpr* const doneRRefp = new AstVarRef{flp, doneRVars[i], VAccess::READ};
-                AstNodeExpr* const doneRightOrp = new AstOr{flp, doneRRefp, acceptRforOr};
+                AstNodeExpr* const doneRightOrp = new AstOr{flp, doneRRefp, acceptRforOrp};
                 doneRightOrp->dtypeSetBit();
-                AstNodeExpr* const bothDonep = new AstAnd{flp, doneROrp, doneRightOrp};
+                AstNodeExpr* const bothDonep = new AstAnd{flp, doneLOrp, doneRightOrp};
                 bothDonep->dtypeSetBit();
-                AstNodeExpr* const oneNowp = new AstOr{flp, acceptLforOne, acceptRforOne};
+                AstNodeExpr* const oneNowp = new AstOr{flp, acceptLforOnep, acceptRforOnep};
                 oneNowp->dtypeSetBit();
                 AstNodeExpr* const acceptp = new AstAnd{flp, bothDonep, oneNowp};
                 acceptp->dtypeSetBit();
@@ -1041,18 +1034,18 @@ public:
                 // stateSig propagation.
                 if (nfa.nodes[edge.toId].isRejectSink) continue;
 
-                AstNodeExpr* const srcSig = stateSig[edge.fromId]->cloneTreePure(false);
-                AstNodeExpr* const contribution = andCond(flp, srcSig, edge.condp);
+                AstNodeExpr* const srcSigp = stateSig[edge.fromId]->cloneTreePure(false);
+                AstNodeExpr* const contributionp = andCond(flp, srcSigp, edge.condp);
 
                 if (!stateSig[edge.toId]) {
-                    stateSig[edge.toId] = contribution;
+                    stateSig[edge.toId] = contributionp;
                     changed = true;
                 } else if (!needsReg[edge.toId]) {
-                    stateSig[edge.toId] = orExprs(flp, stateSig[edge.toId], contribution);
+                    stateSig[edge.toId] = orExprs(flp, stateSig[edge.toId], contributionp);
                     changed = true;
                 } else {
                     // Link targets a registered node -- contribution unused, free it
-                    contribution->deleteTree();
+                    contributionp->deleteTree();
                 }
             }
             if (!changed) break;
@@ -1069,8 +1062,8 @@ public:
                 if (!edge.consumesCycle) continue;
                 if (!stateSig[edge.fromId]) continue;
 
-                AstNodeExpr* srcSig = stateSig[edge.fromId]->cloneTreePure(false);
-                srcSig = andCond(flp, srcSig, edge.condp);
+                AstNodeExpr* srcSigp = stateSig[edge.fromId]->cloneTreePure(false);
+                srcSigp = andCond(flp, srcSigp, edge.condp);
 
                 // Gate state register NBA with !disable unless the snapshot
                 // mechanism is active (which handles disable iff timing
@@ -1079,10 +1072,10 @@ public:
                     AstNodeExpr* const notDisp
                         = new AstNot{flp, disableExprp->cloneTreePure(false)};
                     notDisp->dtypeSetBit();
-                    srcSig = new AstAnd{flp, srcSig, notDisp};
-                    srcSig->dtypeSetBit();
+                    srcSigp = new AstAnd{flp, srcSigp, notDisp};
+                    srcSigp->dtypeSetBit();
                 }
-                nextStatep = orExprs(flp, nextStatep, srcSig);
+                nextStatep = orExprs(flp, nextStatep, srcSigp);
             }
 
             if (!nextStatep) nextStatep = new AstConst{flp, AstConst::BitFalse{}};
@@ -1138,16 +1131,16 @@ public:
                 if (edge.toId != ci) continue;
                 if (!edge.consumesCycle) continue;
                 if (!stateSig[edge.fromId]) continue;
-                AstNodeExpr* contrib = stateSig[edge.fromId]->cloneTreePure(false);
-                contrib = andCond(flp, contrib, edge.condp);
+                AstNodeExpr* contribp = stateSig[edge.fromId]->cloneTreePure(false);
+                contribp = andCond(flp, contribp, edge.condp);
                 if (disableExprp) {
                     AstNodeExpr* const notDisp
                         = new AstNot{flp, disableExprp->cloneTreePure(false)};
                     notDisp->dtypeSetBit();
-                    contrib = new AstAnd{flp, contrib, notDisp};
-                    contrib->dtypeSetBit();
+                    contribp = new AstAnd{flp, contribp, notDisp};
+                    contribp->dtypeSetBit();
                 }
-                incomingp = orExprs(flp, incomingp, contrib);
+                incomingp = orExprs(flp, incomingp, contribp);
             }
             if (!incomingp) incomingp = new AstConst{flp, AstConst::BitFalse{}};
 
@@ -1246,13 +1239,13 @@ public:
             AstNodeExpr* gateLp = acceptLNowp;
             AstNodeExpr* gateRp = acceptRNowp;
             if (disableExprp) {
-                AstNodeExpr* const notDisL = new AstNot{flp, disableExprp->cloneTreePure(false)};
-                notDisL->dtypeSetBit();
-                gateLp = new AstAnd{flp, gateLp, notDisL};
+                AstNodeExpr* const notDisLp = new AstNot{flp, disableExprp->cloneTreePure(false)};
+                notDisLp->dtypeSetBit();
+                gateLp = new AstAnd{flp, gateLp, notDisLp};
                 gateLp->dtypeSetBit();
-                AstNodeExpr* const notDisR = new AstNot{flp, disableExprp->cloneTreePure(false)};
-                notDisR->dtypeSetBit();
-                gateRp = new AstAnd{flp, gateRp, notDisR};
+                AstNodeExpr* const notDisRp = new AstNot{flp, disableExprp->cloneTreePure(false)};
+                notDisRp->dtypeSetBit();
+                gateRp = new AstAnd{flp, gateRp, notDisRp};
                 gateRp->dtypeSetBit();
             }
             AstAssignDly* const setLp
@@ -1299,25 +1292,25 @@ public:
             if (edge.consumesCycle) continue;
             if (!stateSig[edge.fromId]) continue;
 
-            AstNodeExpr* srcSig = stateSig[edge.fromId]->cloneTreePure(false);
-            srcSig = andCond(flp, srcSig, edge.condp);
+            AstNodeExpr* srcSigp = stateSig[edge.fromId]->cloneTreePure(false);
+            srcSigp = andCond(flp, srcSigp, edge.condp);
             // Gate terminal contribution with snapshot check if active.
             if (snapshotOkp) {
-                srcSig = new AstAnd{flp, srcSig, snapshotOkp->cloneTreePure(false)};
-                srcSig->dtypeSetBit();
+                srcSigp = new AstAnd{flp, srcSigp, snapshotOkp->cloneTreePure(false)};
+                srcSigp->dtypeSetBit();
             }
 
             if (nfa.nodes[edge.fromId].isCounter) {
                 const int ci = edge.fromId;
-                // Accept: use srcSig as-is (active && link_cond)
-                terminalActivep = orExprs(flp, terminalActivep, srcSig->cloneTreePure(false));
-                // Reject base: srcSig && (counter == counterRange)
+                // Accept: use srcSigp as-is (active && link_cond)
+                terminalActivep = orExprs(flp, terminalActivep, srcSigp->cloneTreePure(false));
+                // Reject base: srcSigp && (counter == counterRange)
                 AstNodeExpr* const atEndp
                     = new AstEq{flp, new AstVarRef{flp, counterCountVars[ci], VAccess::READ},
                                 new AstConst{flp, AstConst::WidthedValue{}, 32,
                                              static_cast<uint32_t>(nfa.nodes[ci].counterMax)}};
                 atEndp->dtypeSetBit();
-                AstNodeExpr* const expireContribp = new AstAnd{flp, srcSig, atEndp};
+                AstNodeExpr* const expireContribp = new AstAnd{flp, srcSigp, atEndp};
                 expireContribp->dtypeSetBit();
                 rejectBasep = orExprs(flp, rejectBasep, expireContribp);
             } else if (nfa.nodes[edge.fromId].isUnbounded
@@ -1328,10 +1321,10 @@ public:
                 // the exact cycle the aggregated sequence matches, so
                 // treating "formula false" as reject would be wrong -- the
                 // constituent sub-NFAs already emit their own rejects.
-                terminalActivep = orExprs(flp, terminalActivep, srcSig);
+                terminalActivep = orExprs(flp, terminalActivep, srcSigp);
             } else {
-                terminalActivep = orExprs(flp, terminalActivep, srcSig->cloneTreePure(false));
-                rejectBasep = orExprs(flp, rejectBasep, srcSig);
+                terminalActivep = orExprs(flp, terminalActivep, srcSigp->cloneTreePure(false));
+                rejectBasep = orExprs(flp, rejectBasep, srcSigp);
             }
         }
 
@@ -1361,10 +1354,10 @@ public:
             if (edge.consumesCycle) continue;
             if (!stateSig[edge.fromId]) continue;
             if (!edge.condp) continue;
-            AstNodeExpr* const srcSig = stateSig[edge.fromId]->cloneTreePure(false);
+            AstNodeExpr* const srcSigp = stateSig[edge.fromId]->cloneTreePure(false);
             AstNodeExpr* const notCondp = new AstNot{flp, edge.condp->cloneTreePure(false)};
             notCondp->dtypeSetBit();
-            AstNodeExpr* const failp = new AstAnd{flp, srcSig, notCondp};
+            AstNodeExpr* const failp = new AstAnd{flp, srcSigp, notCondp};
             failp->dtypeSetBit();
             requiredStepRejectp = orExprs(flp, requiredStepRejectp, failp);
         }
@@ -1721,16 +1714,11 @@ class AssertNfaVisitor final : public VNVisitor {
     }
 
     static bool hasMultiCycleExpr(const AstNode* nodep) {
-        bool found = false;
-        nodep->foreach([&found](const AstSExpr*) { found = true; });
-        if (!found) nodep->foreach([&found](const AstSConsRep*) { found = true; });
-        if (!found) nodep->foreach([&found](const AstSGotoRep*) { found = true; });
-        if (!found) nodep->foreach([&found](const AstSIntersect*) { found = true; });
-        if (!found) nodep->foreach([&found](const AstSThroughout*) { found = true; });
-        if (!found) nodep->foreach([&found](const AstSAnd*) { found = true; });
-        if (!found) nodep->foreach([&found](const AstSOr*) { found = true; });
-        if (!found) nodep->foreach([&found](const AstSNonConsRep*) { found = true; });
-        return found;
+        return !nodep->forall([](const AstNode* np) {
+            return !VN_IS(np, SExpr) && !VN_IS(np, SConsRep) && !VN_IS(np, SGotoRep)
+                   && !VN_IS(np, SIntersect) && !VN_IS(np, SThroughout) && !VN_IS(np, SAnd)
+                   && !VN_IS(np, SOr) && !VN_IS(np, SNonConsRep);
+        });
     }
 
     struct PropertyParts final {
