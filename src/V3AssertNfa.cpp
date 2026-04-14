@@ -173,8 +173,12 @@ struct BuildResult final {
     // intermediate cycles of the [M,N] window where a match is still
     // possible later if this cycle fails).
     std::vector<int> midSources;
+    // Set when the builder already emitted a specific v3error for this
+    // failure. processAssertion should skip the generic UNSUPPORTED message.
+    bool errorEmitted = false;
     bool valid() const { return termNode >= 0; }
-    static BuildResult fail() { return {-1, nullptr, {}}; }
+    static BuildResult fail(bool errored = false) { return {-1, nullptr, {}, errored}; }
+    static BuildResult failWithError() { return {-1, nullptr, {}, true}; }
 };
 
 //######################################################################
@@ -265,7 +269,7 @@ class SvaNfaBuilder final {
         if (AstSThroughout* const throughp = VN_CAST(nodep, SThroughout)) {
             return fixedLength(throughp->rhsp());
         }
-        if (VN_IS(nodep, ConsRep) || VN_IS(nodep, SGotoRep) || VN_IS(nodep, SAnd)
+        if (VN_IS(nodep, SConsRep) || VN_IS(nodep, SGotoRep) || VN_IS(nodep, SAnd)
             || VN_IS(nodep, SOr) || VN_IS(nodep, SIntersect)) {
             // Conservatively variable -- can be tightened in a follow-up.
             return -1;
@@ -341,7 +345,7 @@ class SvaNfaBuilder final {
         int currentNode = entryNode;
         if (AstNodeExpr* const preExprp = sexprp->preExprp()) {
             const BuildResult pre = buildExpr(preExprp, currentNode, isTopLevelStep);
-            if (!pre.valid()) return BuildResult::fail();
+            if (!pre.valid()) return BuildResult::fail(pre.errorEmitted);
             // If pre has a final condition, add it as a conditioned Link
             if (pre.finalCondp) {
                 const int condNode = scopedCreateNode();
@@ -367,7 +371,12 @@ class SvaNfaBuilder final {
         std::vector<int> rangeMidSources;
         if (delayp->isRangeDelay()) {
             const int minDelay = getConstInt(delayp->lhsp());
-            if (minDelay < 0) return BuildResult::fail();
+            if (minDelay < 0) {
+                delayp->v3error("Range delay minimum is not a non-negative"
+                                " elaboration-time constant"
+                                " (IEEE 1800-2023 16.7)");
+                return BuildResult::failWithError();
+            }
 
             if (delayp->isUnbounded()) {
                 // `##[M:$]`: wait M cycles, then self-loop waiting for the
@@ -378,7 +387,17 @@ class SvaNfaBuilder final {
                 m_inUnboundedScope = true;
             } else {
                 const int maxDelay = getConstInt(delayp->rhsp());
-                if (maxDelay < minDelay) return BuildResult::fail();
+                if (maxDelay < 0) {
+                    delayp->v3error("Range delay maximum is not a non-negative"
+                                    " elaboration-time constant"
+                                    " (IEEE 1800-2023 16.7)");
+                    return BuildResult::failWithError();
+                }
+                if (maxDelay < minDelay) {
+                    delayp->v3error("Range delay maximum must be >= minimum"
+                                    " (IEEE 1800-2023 16.7)");
+                    return BuildResult::failWithError();
+                }
                 if (minDelay == maxDelay) {
                     currentNode = addDelayChain(currentNode, minDelay, flp);
                 } else {
@@ -450,7 +469,12 @@ class SvaNfaBuilder final {
             }
         } else {
             const int delayCycles = getConstInt(delayp->lhsp());
-            if (delayCycles < 0) return BuildResult::fail();
+            if (delayCycles < 0) {
+                delayp->v3error("Delay value is not a non-negative"
+                                " elaboration-time constant"
+                                " (IEEE 1800-2023 16.7)");
+                return BuildResult::failWithError();
+            }
             currentNode = addDelayChain(currentNode, delayCycles, flp);
         }
 
@@ -461,7 +485,7 @@ class SvaNfaBuilder final {
         // would try to use the multi-cycle subtree as a sampled boolean,
         // which produces invalid AST and silently broken assertions.
         AstNodeExpr* const exprp = sexprp->exprp();
-        if (VN_IS(exprp, SExpr) || VN_IS(exprp, SAnd) || VN_IS(exprp, SOr) || VN_IS(exprp, ConsRep)
+        if (VN_IS(exprp, SExpr) || VN_IS(exprp, SAnd) || VN_IS(exprp, SOr) || VN_IS(exprp, SConsRep)
             || VN_IS(exprp, SGotoRep) || VN_IS(exprp, SThroughout) || VN_IS(exprp, SIntersect)) {
             // rangeMidSources should be empty here because the chain path
             // is only taken for pure-boolean RHS.
@@ -471,7 +495,7 @@ class SvaNfaBuilder final {
         return {currentNode, exprp, std::move(rangeMidSources)};
     }
 
-    BuildResult buildConsRep(AstConsRep* repp, int entryNode, bool isTopLevelStep = false) {
+    BuildResult buildConsRep(AstSConsRep* repp, int entryNode, bool isTopLevelStep = false) {
         FileLine* const flp = repp->fileline();
         AstNodeExpr* const exprp = repp->exprp();
         const int minN = getConstInt(repp->countp());
@@ -595,7 +619,9 @@ class SvaNfaBuilder final {
         const BuildResult rhs = buildExpr(rhsExpr, entryNode);
         const bool rhsScope = m_inUnboundedScope;
         m_inUnboundedScope = savedScope || lhsScope || rhsScope;
-        if (!lhs.valid() || !rhs.valid()) return BuildResult::fail();
+        if (!lhs.valid() || !rhs.valid()) {
+            return BuildResult::fail(lhs.errorEmitted || rhs.errorEmitted);
+        }
 
         // Both operands are single-cycle (termNode == entryNode): use a
         // simple boolean AND.  The done-latch combiner incorrectly
@@ -722,7 +748,7 @@ public:
         if (AstSExpr* const sexprp = VN_CAST(nodep, SExpr)) {
             return buildSExpr(sexprp, entryNode, isTopLevelStep);
         }
-        if (AstConsRep* const repp = VN_CAST(nodep, ConsRep)) {
+        if (AstSConsRep* const repp = VN_CAST(nodep, SConsRep)) {
             return buildConsRep(repp, entryNode, isTopLevelStep);
         }
         if (AstSGotoRep* const repp = VN_CAST(nodep, SGotoRep)) {
@@ -735,7 +761,9 @@ public:
             FileLine* const flp = orp->fileline();
             const BuildResult lhs = buildExpr(orp->lhsp(), entryNode);
             const BuildResult rhs = buildExpr(orp->rhsp(), entryNode);
-            if (!lhs.valid() || !rhs.valid()) return BuildResult::fail();
+            if (!lhs.valid() || !rhs.valid()) {
+                return BuildResult::fail(lhs.errorEmitted || rhs.errorEmitted);
+            }
             const int mergeNode = scopedCreateNode();
             if (lhs.finalCondp) {
                 guardedLink(lhs.termNode, mergeNode, sampled(lhs.finalCondp->cloneTreePure(false)),
@@ -755,7 +783,9 @@ public:
             FileLine* const flp = orp->fileline();
             const BuildResult lhs = buildExpr(orp->lhsp(), entryNode);
             const BuildResult rhs = buildExpr(orp->rhsp(), entryNode);
-            if (!lhs.valid() || !rhs.valid()) return BuildResult::fail();
+            if (!lhs.valid() || !rhs.valid()) {
+                return BuildResult::fail(lhs.errorEmitted || rhs.errorEmitted);
+            }
             const int mergeNode = scopedCreateNode();
             if (lhs.finalCondp) {
                 guardedLink(lhs.termNode, mergeNode, sampled(lhs.finalCondp->cloneTreePure(false)),
@@ -1532,6 +1562,14 @@ class AssertNfaVisitor final : public VNVisitor {
     V3UniqueNames m_propVarNames{"__Vpropvar"};
     V3UniqueNames m_disableCntNames{"__VnfaDis"};
 
+    // Extract body expression from an AstSequence definition.
+    // Skips port AstVar nodes at the front of stmtsp().
+    static AstNodeExpr* getSequenceBodyExprp(const AstSequence* seqp) {
+        AstNode* bodyp = seqp->stmtsp();
+        while (bodyp && VN_IS(bodyp, Var)) bodyp = bodyp->nextp();
+        return VN_CAST(bodyp, NodeExpr);
+    }
+
     // Extract AstPropSpec body from an AstProperty definition.
     // Skips port AstVar and AstInitial* nodes at the front of stmtsp().
     static AstPropSpec* getPropertyExprp(const AstProperty* propp) {
@@ -1623,10 +1661,57 @@ class AssertNfaVisitor final : public VNVisitor {
         VL_DO_DANGLING(pushDeletep(outerSpecp), outerSpecp);
     }
 
+    // Inline a named sequence call (FuncRef -> Sequence) into the
+    // assertion's expression tree. Mirrors V3AssertPre::substituteSequenceCall.
+    void inlineSequenceRef(AstFuncRef* funcrefp, const AstSequence* seqp) {
+        AstNodeExpr* const bodyExprp = getSequenceBodyExprp(seqp);
+        UASSERT_OBJ(bodyExprp, funcrefp, "Sequence has no body expression");
+        AstNodeExpr* const clonedp = bodyExprp->cloneTree(false);
+
+        // Build substitution map for formal port parameters
+        const V3TaskConnects tconnects = V3Task::taskConnects(funcrefp, seqp->stmtsp());
+        std::unordered_map<const AstVar*, AstNodeExpr*> portMap;
+        for (const auto& tconnect : tconnects) {
+            portMap[tconnect.first] = tconnect.second->exprp();
+        }
+        clonedp->foreach([&](AstVarRef* refp) {
+            const auto it = portMap.find(refp->varp());
+            if (it != portMap.end()) {
+                refp->replaceWith(it->second->cloneTree(false));
+                VL_DO_DANGLING(pushDeletep(refp), refp);
+            }
+        });
+        // Clean up argument expressions owned by FuncRef
+        for (const auto& tconnect : tconnects) {
+            pushDeletep(tconnect.second->exprp()->unlinkFrBack());
+        }
+        funcrefp->replaceWith(clonedp);
+        VL_DO_DANGLING(pushDeletep(funcrefp), funcrefp);
+    }
+
+    // Inline all named sequence references in the assertion subtree.
+    // Must run before hasMultiCycleExpr() so that multi-cycle sequence
+    // bodies are visible for NFA conversion. Without this, named sequences
+    // would pass through to V3AssertPre (which runs after V3AssertNfa),
+    // and their multi-cycle bodies would never be compiled by the NFA engine.
+    void inlineAllSequenceRefs(AstNode* rootp) {
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            rootp->foreach([&](AstFuncRef* funcrefp) {
+                if (changed) return;
+                if (const AstSequence* const seqp = VN_CAST(funcrefp->taskp(), Sequence)) {
+                    inlineSequenceRef(funcrefp, seqp);
+                    changed = true;
+                }
+            });
+        }
+    }
+
     static bool hasMultiCycleExpr(const AstNode* nodep) {
         bool found = false;
         nodep->foreach([&found](const AstSExpr*) { found = true; });
-        if (!found) nodep->foreach([&found](const AstConsRep*) { found = true; });
+        if (!found) nodep->foreach([&found](const AstSConsRep*) { found = true; });
         if (!found) nodep->foreach([&found](const AstSGotoRep*) { found = true; });
         if (!found) nodep->foreach([&found](const AstSIntersect*) { found = true; });
         if (!found) nodep->foreach([&found](const AstSThroughout*) { found = true; });
@@ -1670,6 +1755,11 @@ class AssertNfaVisitor final : public VNVisitor {
                 }
             }
         }
+
+        // Inline named sequence calls (FuncRef -> Sequence) anywhere in
+        // the assertion tree. Must run before hasMultiCycleExpr() so that
+        // multi-cycle sequence bodies are visible for NFA conversion.
+        inlineAllSequenceRefs(assertp->propp());
 
         AstNode* const propp = assertp->propp();
         if (!hasMultiCycleExpr(propp)) return;
@@ -1783,8 +1873,12 @@ class AssertNfaVisitor final : public VNVisitor {
             // NFA sub-graph whose terminal is the "match" point.
             const BuildResult antResult = builder.buildExpr(parts.triggerExprp, nfa.startNode);
             if (!antResult.valid()) {
-                assertp->v3warn(E_UNSUPPORTED, "Unsupported: assertion antecedent contains SVA"
-                                               " construct not yet supported by NFA engine");
+                if (!antResult.errorEmitted) {
+                    assertp->v3warn(
+                        E_UNSUPPORTED,
+                        "Unsupported: assertion antecedent contains SVA"
+                        " construct not yet supported by NFA engine");
+                }
                 if (senTreeOwned) senTreep->deleteTree();
                 if (disableExprUnlinked) disableExprp->deleteTree();
                 // Replace property with a safe placeholder so downstream passes
@@ -1858,10 +1952,13 @@ class AssertNfaVisitor final : public VNVisitor {
         if (!result.valid()) {
             // NFA cannot handle this assertion -- emit UNSUPPORTED rather than
             // silently passing it through (there is no fallback anymore).
-            assertp->v3warn(E_UNSUPPORTED,
-                            "Unsupported: assertion contains SVA construct not yet"
-                            " supported by NFA engine (e.g. intersect, sequence and,"
-                            " complex throughout)");
+            // Skip generic message if the builder already emitted a specific error.
+            if (!result.errorEmitted) {
+                assertp->v3warn(E_UNSUPPORTED,
+                                "Unsupported: assertion contains SVA construct not yet"
+                                " supported by NFA engine (e.g. intersect, sequence and,"
+                                " complex throughout)");
+            }
             if (senTreeOwned) senTreep->deleteTree();
             if (disableExprUnlinked) disableExprp->deleteTree();
             // Replace property with a safe placeholder so downstream passes
