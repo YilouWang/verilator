@@ -696,7 +696,8 @@ class SvaNfaBuilder final {
         return {combNode, nullptr, {}};
     }
 
-    BuildResult buildThroughout(AstSThroughout* nodep, int entryNode) {
+    BuildResult buildThroughout(AstSThroughout* nodep, int entryNode,
+                                bool isTopLevelStep = false) {
         // The entryNode may have been created outside this throughout scope
         // (e.g. the antecedent trigNode for `a |-> (cond throughout seq)`).
         // Mark it with the guard so that "cond is false at tick 0 when the
@@ -709,7 +710,11 @@ class SvaNfaBuilder final {
         // makes nested repetition/SOr/SAnd/throughout/intersect RHS work
         // without per-node special casing.
         m_throughoutStack.push_back(nodep->lhsp());
-        const BuildResult result = buildExpr(nodep->rhsp(), entryNode);
+        // Pass isTopLevelStep so that the outermost required boolean check
+        // inside the throughout body (e.g. preExpr of b ##[1:2] c) is
+        // marked rejectOnFail. Without this, a trigger that fires when
+        // the first boolean is false would silently not reject.
+        const BuildResult result = buildExpr(nodep->rhsp(), entryNode, isTopLevelStep);
         m_throughoutStack.pop_back();
         // finalCondp is a pointer to an AST-linked expression; the emitter
         // clones it when emitting the reject check. The accept edge already
@@ -749,7 +754,7 @@ public:
             return buildGotoRep(repp, entryNode);
         }
         if (AstSThroughout* const throughoutp = VN_CAST(nodep, SThroughout)) {
-            return buildThroughout(throughoutp, entryNode);
+            return buildThroughout(throughoutp, entryNode, isTopLevelStep);
         }
         if (AstSOr* const orp = VN_CAST(nodep, SOr)) {
             FileLine* const flp = orp->fileline();
@@ -1472,7 +1477,10 @@ public:
                 }
                 return negRejectp ? negRejectp : new AstConst{flp, AstConst::BitFalse{}};
             }
-            // Negated assert/assume: return !accept (fails when P matches)
+            // Negated assert/assume: output = !accept (assertion fails when inner P matches).
+            // For pass-handler gating: NOT-P passes when inner P REJECTS -- i.e., when
+            // reject_of_inner_P fires. Using the raw !accept would cause vacuous passes
+            // (fires every cycle where no instance has completed, not just when P rejected).
             AstNodeExpr* acceptp = terminalActivep;
             if (acceptCondp) {
                 AstNodeExpr* const sampledCondp
@@ -1480,6 +1488,28 @@ public:
                 sampledCondp->dtypeFrom(acceptCondp);
                 acceptp = new AstAnd{flp, acceptp, sampledCondp};
                 acceptp->dtypeSetBit();
+            }
+            // Build reject_of_inner_P for passsp gating before deleting the signals.
+            if (outAcceptpp) {
+                AstNodeExpr* notPAcceptp = nullptr;
+                if (acceptCondp && rejectBasep) {
+                    AstNodeExpr* const sampledCondp
+                        = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
+                    sampledCondp->dtypeFrom(acceptCondp);
+                    AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
+                    notCondp->dtypeSetBit();
+                    notPAcceptp = new AstAnd{flp, rejectBasep->cloneTreePure(false), notCondp};
+                    notPAcceptp->dtypeSetBit();
+                } else if (rejectBasep) {
+                    notPAcceptp = rejectBasep->cloneTreePure(false);
+                }
+                if (throughoutRejectp)
+                    notPAcceptp
+                        = orExprs(flp, notPAcceptp, throughoutRejectp->cloneTreePure(false));
+                if (requiredStepRejectp)
+                    notPAcceptp
+                        = orExprs(flp, notPAcceptp, requiredStepRejectp->cloneTreePure(false));
+                *outAcceptpp = notPAcceptp;
             }
             if (throughoutRejectp) throughoutRejectp->deleteTree();
             if (rejectBasep) rejectBasep->deleteTree();
@@ -1930,8 +1960,19 @@ class AssertNfaVisitor final : public VNVisitor {
                 nfa.addLink(result.termNode, nfa.acceptNode);
                 // Range-delay mid-window positions: accept-only (Phase 3
                 // skips reject contribution because we mark isUnbounded).
+                // Apply the node's stored throughout conditions to the link
+                // so that a mid-position cannot accept while a throughout
+                // guard is violated (otherwise throughout-drop fires as reject
+                // but the simultaneous unconditional accept would erroneously
+                // fire pass action).
                 for (int src : result.midSources) {
-                    nfa.addLink(src, nfa.acceptNode);
+                    AstNodeExpr* condp = nullptr;
+                    for (AstNodeExpr* const tc : nfa.nodes[src].throughoutConds) {
+                        AstNodeExpr* const tcClone = tc->cloneTreePure(false);
+                        condp = condp ? new AstAnd{flp, condp, tcClone} : tcClone;
+                        if (condp->width() != 1) condp->dtypeSetBit();
+                    }
+                    nfa.addLink(src, nfa.acceptNode, condp);
                     nfa.nodes[src].isUnbounded = true;
                 }
             }
@@ -1942,7 +1983,13 @@ class AssertNfaVisitor final : public VNVisitor {
                 nfa.createAcceptNode();
                 nfa.addLink(result.termNode, nfa.acceptNode);
                 for (int src : result.midSources) {
-                    nfa.addLink(src, nfa.acceptNode);
+                    AstNodeExpr* condp = nullptr;
+                    for (AstNodeExpr* const tc : nfa.nodes[src].throughoutConds) {
+                        AstNodeExpr* const tcClone = tc->cloneTreePure(false);
+                        condp = condp ? new AstAnd{flp, condp, tcClone} : tcClone;
+                        if (condp->width() != 1) condp->dtypeSetBit();
+                    }
+                    nfa.addLink(src, nfa.acceptNode, condp);
                     nfa.nodes[src].isUnbounded = true;
                 }
             }
@@ -2001,14 +2048,27 @@ class AssertNfaVisitor final : public VNVisitor {
         // allocated node (backp()==nullptr means it has no AST parent).
         if (result.finalCondp && !result.finalCondp->backp()) { result.finalCondp->deleteTree(); }
 
-        // Gate pass handler with accept signal to avoid vacuous-pass
-        // firings on non-terminal cycles (standalone sequences only).
+        // Gate pass action with accept signal.
+        // Crucially, also prepend a gated copy to the fail handler so that when
+        // reject=1 && accept=1 in the same cycle (different overlapping instances),
+        // both pass and fail actions fire independently (IEEE 1800-2023 16.12).
+        // Keeping passsp only in the assertion's pass handler would suppress it
+        // whenever reject=1, producing {fails:1, passs:0} instead of {fails:1, passs:1}.
         if (needAccept && acceptExprp) {
             AstNode* passsp = assertAssertp->passsp();
             if (passsp) {
                 passsp->unlinkFrBackWithNext();
-                AstIf* const gateIfp = new AstIf{flp, acceptExprp, passsp, nullptr};
-                assertAssertp->addPasssp(gateIfp);
+                // Pass handler: fires when !reject && accept.
+                assertAssertp->addPasssp(new AstIf{flp, acceptExprp->cloneTreePure(false),
+                                                    passsp->cloneTreePure(false), nullptr});
+                // Fail handler prefix: fires when reject && accept (simultaneous case).
+                if (AstNode* const failsp = assertAssertp->failsp()) {
+                    failsp->addHereThisAsNext(
+                        new AstIf{flp, acceptExprp, passsp->cloneTreePure(false), nullptr});
+                } else {
+                    acceptExprp->deleteTree();
+                }
+                VL_DO_DANGLING(pushDeletep(passsp), passsp);
             } else {
                 acceptExprp->deleteTree();
             }

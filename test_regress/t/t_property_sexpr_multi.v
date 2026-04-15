@@ -4,6 +4,9 @@
 // SPDX-FileCopyrightText: 2025 Antmicro
 // SPDX-License-Identifier: CC0-1.0
 
+// verilog_format: off
+/* verilator lint_off SIDEEFFECT */
+// verilog_format: on
 `define STRINGIFY(x) `"x`"
 `define TRIGGER(e) ->e; $display("[cyc=%0d, val=%0d] triggered %s", cyc, val, `STRINGIFY(e))
 
