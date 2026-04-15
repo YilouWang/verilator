@@ -22,7 +22,7 @@
 //
 //*************************************************************************
 
-#include "V3PchAstNoMT.h"
+#include "V3PchAstNoMT.h"  // VL_MT_DISABLED_CODE_UNIT
 
 #include "V3AssertNfa.h"
 
@@ -487,6 +487,27 @@ class SvaNfaBuilder final {
         return {currentNode, nullptr, {}};
     }
 
+    // Build merge node for SOr / LogOr: both branches feed into one node.
+    BuildResult buildOrMerge(AstNodeExpr* lhsp, AstNodeExpr* rhsp, int entryNode, FileLine* flp) {
+        const BuildResult lhs = buildExpr(lhsp, entryNode);
+        const BuildResult rhs = buildExpr(rhsp, entryNode);
+        if (!lhs.valid() || !rhs.valid()) {
+            return BuildResult::fail(lhs.errorEmitted || rhs.errorEmitted);
+        }
+        const int mergeNode = scopedCreateNode();
+        if (lhs.finalCondp) {
+            guardedLink(lhs.termNode, mergeNode, sampled(lhs.finalCondp->cloneTreePure(false)), flp);
+        } else {
+            guardedLink(lhs.termNode, mergeNode, flp);
+        }
+        if (rhs.finalCondp) {
+            guardedLink(rhs.termNode, mergeNode, sampled(rhs.finalCondp->cloneTreePure(false)), flp);
+        } else {
+            guardedLink(rhs.termNode, mergeNode, flp);
+        }
+        return {mergeNode, nullptr, {}};
+    }
+
     // Build done-latch combiner for SAnd/SIntersect (IEEE 1800-2023 16.9.5).
     BuildResult buildAndCombiner(AstNodeExpr* lhsExprp, AstNodeExpr* rhsExprp, int entryNode,
                                  FileLine* flp) {
@@ -595,48 +616,10 @@ public:
             return buildThroughout(throughoutp, entryNode, isTopLevelStep);
         }
         if (AstSOr* const orp = VN_CAST(nodep, SOr)) {
-            FileLine* const flp = orp->fileline();
-            const BuildResult lhs = buildExpr(orp->lhsp(), entryNode);
-            const BuildResult rhs = buildExpr(orp->rhsp(), entryNode);
-            if (!lhs.valid() || !rhs.valid()) {
-                return BuildResult::fail(lhs.errorEmitted || rhs.errorEmitted);
-            }
-            const int mergeNode = scopedCreateNode();
-            if (lhs.finalCondp) {
-                guardedLink(lhs.termNode, mergeNode, sampled(lhs.finalCondp->cloneTreePure(false)),
-                            flp);
-            } else {
-                guardedLink(lhs.termNode, mergeNode, flp);
-            }
-            if (rhs.finalCondp) {
-                guardedLink(rhs.termNode, mergeNode, sampled(rhs.finalCondp->cloneTreePure(false)),
-                            flp);
-            } else {
-                guardedLink(rhs.termNode, mergeNode, flp);
-            }
-            return {mergeNode, nullptr, {}};
+            return buildOrMerge(orp->lhsp(), orp->rhsp(), entryNode, orp->fileline());
         }
         if (AstLogOr* const orp = VN_CAST(nodep, LogOr)) {
-            FileLine* const flp = orp->fileline();
-            const BuildResult lhs = buildExpr(orp->lhsp(), entryNode);
-            const BuildResult rhs = buildExpr(orp->rhsp(), entryNode);
-            if (!lhs.valid() || !rhs.valid()) {
-                return BuildResult::fail(lhs.errorEmitted || rhs.errorEmitted);
-            }
-            const int mergeNode = scopedCreateNode();
-            if (lhs.finalCondp) {
-                guardedLink(lhs.termNode, mergeNode, sampled(lhs.finalCondp->cloneTreePure(false)),
-                            flp);
-            } else {
-                guardedLink(lhs.termNode, mergeNode, flp);
-            }
-            if (rhs.finalCondp) {
-                guardedLink(rhs.termNode, mergeNode, sampled(rhs.finalCondp->cloneTreePure(false)),
-                            flp);
-            } else {
-                guardedLink(rhs.termNode, mergeNode, flp);
-            }
-            return {mergeNode, nullptr, {}};
+            return buildOrMerge(orp->lhsp(), orp->rhsp(), entryNode, orp->fileline());
         }
         if (AstSAnd* const andp = VN_CAST(nodep, SAnd)) {
             return buildAndCombiner(andp->lhsp(), andp->rhsp(), entryNode, andp->fileline());
@@ -803,20 +786,20 @@ public:
                 if (l < 0 || r < 0) continue;
                 if (!stateSig[l] || !stateSig[r]) continue;
 
-                AstNodeExpr* const acceptLforOrp = buildAcceptNow(stateSig[l], node.andLhsCondp);
-                AstNodeExpr* const acceptRforOrp = buildAcceptNow(stateSig[r], node.andRhsCondp);
-                AstNodeExpr* const acceptLforOnep = buildAcceptNow(stateSig[l], node.andLhsCondp);
-                AstNodeExpr* const acceptRforOnep = buildAcceptNow(stateSig[r], node.andRhsCondp);
+                AstNodeExpr* const acceptLNowp = buildAcceptNow(stateSig[l], node.andLhsCondp);
+                AstNodeExpr* const acceptRNowp = buildAcceptNow(stateSig[r], node.andRhsCondp);
 
                 AstNodeExpr* const doneLRefp = new AstVarRef{flp, doneLVars[i], VAccess::READ};
-                AstNodeExpr* const doneLOrp = new AstOr{flp, doneLRefp, acceptLforOrp};
+                AstNodeExpr* const doneLOrp = new AstOr{flp, doneLRefp, acceptLNowp};
                 doneLOrp->dtypeSetBit();
                 AstNodeExpr* const doneRRefp = new AstVarRef{flp, doneRVars[i], VAccess::READ};
-                AstNodeExpr* const doneRightOrp = new AstOr{flp, doneRRefp, acceptRforOrp};
-                doneRightOrp->dtypeSetBit();
-                AstNodeExpr* const bothDonep = new AstAnd{flp, doneLOrp, doneRightOrp};
+                AstNodeExpr* const doneROrp = new AstOr{flp, doneRRefp, acceptRNowp};
+                doneROrp->dtypeSetBit();
+                AstNodeExpr* const bothDonep = new AstAnd{flp, doneLOrp, doneROrp};
                 bothDonep->dtypeSetBit();
-                AstNodeExpr* const oneNowp = new AstOr{flp, acceptLforOnep, acceptRforOnep};
+                AstNodeExpr* const oneNowp
+                    = new AstOr{flp, acceptLNowp->cloneTreePure(false),
+                                acceptRNowp->cloneTreePure(false)};
                 oneNowp->dtypeSetBit();
                 AstNodeExpr* const acceptp = new AstAnd{flp, bothDonep, oneNowp};
                 acceptp->dtypeSetBit();
@@ -1294,11 +1277,28 @@ public:
 // Top-level visitor
 
 class AssertNfaVisitor final : public VNVisitor {
+    // STATE
     AstNodeModule* m_modp = nullptr;
     SvaNfaEmitter* m_emitterp = nullptr;
     V3UniqueNames m_propVarNames{"__Vpropvar"};
     V3UniqueNames m_disableCntNames{"__VnfaDis"};
     std::set<const AstProperty*> m_inliningProps;  // Recursion guard for inlineNamedProperty
+
+    // Wire accept node and mid-window sources for a successful NFA build.
+    static void wireAcceptAndMidSources(SvaNfa& nfa, const BuildResult& result, FileLine* flp) {
+        nfa.createAcceptNode();
+        nfa.addLink(result.termNode, nfa.acceptNode);
+        for (int src : result.midSources) {
+            AstNodeExpr* condp = nullptr;
+            for (AstNodeExpr* const tc : nfa.nodes[src].throughoutConds) {
+                AstNodeExpr* const tcClone = tc->cloneTreePure(false);
+                condp = condp ? new AstAnd{flp, condp, tcClone} : tcClone;
+                if (condp->width() != 1) condp->dtypeSetBit();
+            }
+            nfa.addLink(src, nfa.acceptNode, condp);
+            nfa.nodes[src].isUnbounded = true;
+        }
+    }
 
     static AstNodeExpr* getSequenceBodyExprp(const AstSequence* seqp) {
         AstNode* bodyp = seqp->stmtsp();
@@ -1306,14 +1306,14 @@ class AssertNfaVisitor final : public VNVisitor {
         return VN_CAST(bodyp, NodeExpr);
     }
 
-    static AstPropSpec* getPropertyExprp(const AstProperty* propp) {
-        AstNode* propExprp = propp->stmtsp();
-        while (propExprp
-               && (VN_IS(propExprp, Var) || VN_IS(propExprp, InitialStaticStmt)
-                   || VN_IS(propExprp, InitialAutomaticStmt))) {
-            propExprp = propExprp->nextp();
+    static AstPropSpec* getPropertySpecp(const AstProperty* propp) {
+        AstNode* stmtp = propp->stmtsp();
+        while (stmtp
+               && (VN_IS(stmtp, Var) || VN_IS(stmtp, InitialStaticStmt)
+                   || VN_IS(stmtp, InitialAutomaticStmt))) {
+            stmtp = stmtp->nextp();
         }
-        return VN_CAST(propExprp, PropSpec);
+        return VN_CAST(stmtp, PropSpec);
     }
 
     void inlineNamedProperty(AstPropSpec* outerSpecp, AstFuncRef* funcrefp,
@@ -1330,9 +1330,9 @@ class AssertNfaVisitor final : public VNVisitor {
             const AstProperty* keyp;
             ~Guard() { setr.erase(keyp); }
         } guard{m_inliningProps, propyp};
-        AstPropSpec* propExprp = getPropertyExprp(propyp);
-        UASSERT_OBJ(propExprp, funcrefp, "Property has no body PropSpec");
-        propExprp = propExprp->cloneTree(false);
+        AstPropSpec* propSpecp = getPropertySpecp(propyp);
+        UASSERT_OBJ(propSpecp, funcrefp, "Property has no body PropSpec");
+        propSpecp = propSpecp->cloneTree(false);
 
         const V3TaskConnects tconnects = V3Task::taskConnects(funcrefp, propyp->stmtsp());
         std::unordered_map<const AstVar*, AstNodeExpr*> portMap;
@@ -1355,7 +1355,7 @@ class AssertNfaVisitor final : public VNVisitor {
             }
         }
 
-        propExprp->foreach([&](AstVarRef* refp) {
+        propSpecp->foreach([&](AstVarRef* refp) {
             {
                 const auto portIt = portMap.find(refp->varp());
                 if (portIt != portMap.end()) {
@@ -1375,27 +1375,27 @@ class AssertNfaVisitor final : public VNVisitor {
         }
 
         // Merge disable iff (IEEE 1800-2023 16.12.1)
-        if (outerSpecp->disablep() && propExprp->disablep()) {
+        if (outerSpecp->disablep() && propSpecp->disablep()) {
             outerSpecp->v3error("disable iff expression before property call "
                                 "and in its body is not legal");
-            pushDeletep(propExprp->disablep()->unlinkFrBack());
+            pushDeletep(propSpecp->disablep()->unlinkFrBack());
         }
         if (outerSpecp->disablep()) {
-            propExprp->disablep(outerSpecp->disablep()->unlinkFrBack());
+            propSpecp->disablep(outerSpecp->disablep()->unlinkFrBack());
         }
 
-        if (outerSpecp->sensesp() && propExprp->sensesp()) {
+        if (outerSpecp->sensesp() && propSpecp->sensesp()) {
             outerSpecp->v3warn(E_UNSUPPORTED,
                                "Unsupported: Clock event before property call and in its body");
-            pushDeletep(propExprp->sensesp()->unlinkFrBack());
+            pushDeletep(propSpecp->sensesp()->unlinkFrBack());
         }
         if (outerSpecp->sensesp()) {
             AstSenItem* const sensesp = outerSpecp->sensesp();
             sensesp->unlinkFrBack();
-            propExprp->sensesp(sensesp);
+            propSpecp->sensesp(sensesp);
         }
 
-        outerSpecp->replaceWith(propExprp);
+        outerSpecp->replaceWith(propSpecp);
         VL_DO_DANGLING(pushDeletep(outerSpecp), outerSpecp);
     }
 
@@ -1601,38 +1601,10 @@ class AssertNfaVisitor final : public VNVisitor {
                                            /*isTopLevelStep=*/true);
             }
 
-            if (result.valid()) {
-                nfa.createAcceptNode();
-                nfa.addLink(result.termNode, nfa.acceptNode);
-                // Mid-window sources: accept-only (isUnbounded). Thread throughout
-                // conditions into the link to prevent spurious accept alongside drop-reject.
-                for (int src : result.midSources) {
-                    AstNodeExpr* condp = nullptr;
-                    for (AstNodeExpr* const tc : nfa.nodes[src].throughoutConds) {
-                        AstNodeExpr* const tcClone = tc->cloneTreePure(false);
-                        condp = condp ? new AstAnd{flp, condp, tcClone} : tcClone;
-                        if (condp->width() != 1) condp->dtypeSetBit();
-                    }
-                    nfa.addLink(src, nfa.acceptNode, condp);
-                    nfa.nodes[src].isUnbounded = true;
-                }
-            }
+            if (result.valid()) wireAcceptAndMidSources(nfa, result, flp);
         } else {
             result = builder.build(seqBodyp);
-            if (result.valid()) {
-                nfa.createAcceptNode();
-                nfa.addLink(result.termNode, nfa.acceptNode);
-                for (int src : result.midSources) {
-                    AstNodeExpr* condp = nullptr;
-                    for (AstNodeExpr* const tc : nfa.nodes[src].throughoutConds) {
-                        AstNodeExpr* const tcClone = tc->cloneTreePure(false);
-                        condp = condp ? new AstAnd{flp, condp, tcClone} : tcClone;
-                        if (condp->width() != 1) condp->dtypeSetBit();
-                    }
-                    nfa.addLink(src, nfa.acceptNode, condp);
-                    nfa.nodes[src].isUnbounded = true;
-                }
-            }
+            if (result.valid()) wireAcceptAndMidSources(nfa, result, flp);
         }
 
         if (!result.valid()) {
