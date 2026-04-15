@@ -17,7 +17,7 @@ module t (
   int cyc;
   reg [63:0] crc;
 
-  // Derive signals from non-adjacent CRC bits (lesson 17: avoid shift correlation)
+  // Derive signals from non-adjacent CRC bits to avoid LFSR shift correlation
   wire a = crc[0];
   wire b = crc[4];
   wire c = crc[8];

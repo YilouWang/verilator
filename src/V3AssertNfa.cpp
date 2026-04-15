@@ -2,16 +2,6 @@
 //*************************************************************************
 // DESCRIPTION: Verilator: NFA-based multi-cycle SVA assertion evaluation
 //
-// Converts multi-cycle SVA sequence/property expressions into NFA graphs,
-// then emits module-level 1-bit state registers driven by AstAlways blocks.
-// Overlapping evaluations are naturally supported because new triggers OR
-// into the start node each cycle while in-progress evaluations advance
-// through different NFA nodes.
-//
-// Runs BEFORE V3AssertProp and V3AssertPre. Assertions converted here are
-// replaced with combinational accept/reject checks, so V3AssertProp sees
-// no multi-cycle SExpr.
-//
 // Code available from: https://verilator.org
 //
 //*************************************************************************
@@ -23,6 +13,14 @@
 // SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 //
 //*************************************************************************
+// V3AssertNfa's Transformations:
+//
+//  - Convert multi-cycle SVA sequences/properties into NFA graphs.
+//  - Emit module-level state registers driven by AstAlways blocks.
+//  - Replace converted assertions with combinational accept/reject checks
+//    so V3AssertProp/V3AssertPre see no multi-cycle SExpr.
+//
+//*************************************************************************
 
 #include "V3PchAstNoMT.h"
 
@@ -32,6 +30,7 @@
 #include "V3Task.h"
 #include "V3UniqueNames.h"
 
+#include <set>
 #include <vector>
 
 VL_DEFINE_DEBUG_FUNCTIONS;
@@ -44,21 +43,13 @@ namespace {
 struct SvaNfaNode final {
     int id;
     bool isAccept = false;
-    bool isReject = false;
     // Throughout scope: if non-empty, this node represents an attempt that is
     // alive inside one or more `expr throughout seq` scopes. If any of these
     // exprs drop (sampled value false) while this node is active, the
     // evaluation MUST reject per IEEE 1800-2023 16.9.9 (seq cannot complete
     // because expr1 stopped holding). These are owned clones.
     std::vector<AstNodeExpr*> throughoutConds;
-    // Counter FSM node: if `isCounter` is true, this node is not a plain
-    // register but a 2-register FSM (active + counter). It represents a
-    // [0:counterRange] wait window where the consequent can be checked at any
-    // cycle in [0, counterRange]. Used by `##[M:N]` when N-M exceeds the
-    // register-chain threshold; the M-cycle prefix is still handled by a
-    // regular delay chain. Non-overlapping (single attempt in flight) --
-    // acceptable tradeoff per IEEE 1800-2023 16.9.2, since the alternative
-    // (one register per cycle) explodes for large N-M.
+    // Counter FSM node: represents a ##[M:N] wait window when N-M > kChainLimit
     bool isCounter = false;
     int counterMin = 0;  // Start of [min,max] match window
     int counterMax = 0;  // Inclusive end of window; reject fires here
@@ -67,23 +58,13 @@ struct SvaNfaNode final {
     // reject must NOT fire from this source (IEEE weak semantics). Only
     // accept/cover are meaningful.
     bool isUnbounded = false;
-    // Temporal sequence-AND combiner: aggregates two parallel sub-NFA
-    // accept signals via done-latches per IEEE 16.9.5 (end time = max of
-    // both operands). Emitter allocates per-combiner `doneL`/`doneR`
-    // registers, computes stateSig as the combined accept formula, and
-    // emits a dedicated always block updating the latches. Accept-only
-    // (never contributes to reject -- sub-sequences emit their own rejects).
+    // Temporal sequence AND combiner per IEEE 1800-2023 16.9.5
     bool isAndCombiner = false;
     int andLhsTermId = -1;
     int andRhsTermId = -1;
     AstNodeExpr* andLhsCondp = nullptr;  // OWNED; may be null
     AstNodeExpr* andRhsCondp = nullptr;  // OWNED; may be null
-    // Reject-only sink: a node that exists solely as a target for
-    // rejectOnFail Links (Phase 3a). It must not participate in Phase 1
-    // stateSig propagation (it has no meaningful "active" semantics) and
-    // must not appear in Phase 2/Phase 3 enumerations. Used by SAnd to
-    // wire sub-sequence terminal-boolean rejects without polluting the
-    // combiner's accept formula.
+    // Reject sink for SAnd rejectOnFail wiring; not a stateSig source
     bool isRejectSink = false;
 };
 
@@ -92,12 +73,8 @@ struct SvaNfaEdge final {
     int toId;
     AstNodeExpr* condp = nullptr;  // nullptr = unconditional; OWNED by NFA
     bool consumesCycle;  // true = Edge (##1), false = Link (##0/boolean)
-    // rejectOnFail: if the source state is active and condp is false,
-    // contribute to the reject signal. Used for "required first step"
-    // boolean checks where failure at that cycle terminates the attempt
-    // immediately (not a window retry). Set only on the outermost
-    // required-step Link of a sequence build; nested / merged / optional
-    // Links must NOT set this.
+    // Reject when source is active and condp is false. Set only on the
+    // outermost required-step Link; nested / optional Links must not set this.
     bool rejectOnFail = false;
 };
 
@@ -271,9 +248,7 @@ class SvaNfaBuilder final {
         return 0;
     }
 
-    // Wrap expression in AstSampled for correct IEEE concurrent assertion semantics
     static AstNodeExpr* sampled(AstNodeExpr* exprp) {
-        // All conditions in NFA use $sampled values
         AstSampled* const sp = new AstSampled{exprp->fileline(), exprp};
         sp->dtypeFrom(exprp);
         return sp;
@@ -495,6 +470,20 @@ class SvaNfaBuilder final {
     BuildResult buildConsRep(AstSConsRep* repp, int entryNode, bool isTopLevelStep = false) {
         FileLine* const flp = repp->fileline();
         AstNodeExpr* const exprp = repp->exprp();
+        // Multi-cycle sequence expression as the repeated element is not yet
+        // supported (e.g. `(a ##2 b) [*3]`). The NFA builder would need to
+        // recursively build a sub-NFA for exprp and compose it N times, which
+        // requires a clone-and-rewire pass that is not yet implemented.
+        // Treating it as a boolean via sampled() produces invalid AST and
+        // silently broken assertions, so bail early.
+        if (VN_IS(exprp, SExpr) || VN_IS(exprp, SThroughout) || VN_IS(exprp, SAnd)
+            || VN_IS(exprp, SOr) || VN_IS(exprp, SConsRep) || VN_IS(exprp, SGotoRep)
+            || VN_IS(exprp, SIntersect) || VN_IS(exprp, SNonConsRep)) {
+            repp->v3warn(E_UNSUPPORTED,
+                         "Unsupported: multi-cycle sequence expression inside"
+                         " consecutive repetition (IEEE 1800-2023 16.9.2)");
+            return BuildResult::failWithError();
+        }
         const int minN = getConstInt(repp->countp());
         if (minN < 0) return BuildResult::fail();
         // Guard against excessively large exact repetitions that would
@@ -817,10 +806,10 @@ public:
             const int rhsLen = fixedLength(intp->rhsp());
             if (lhsLen < 0 || rhsLen < 0) return BuildResult::fail();
             if (lhsLen != rhsLen) {
-                intp->v3warn(WIDTHTRUNC, "Intersect sequence length mismatch: left "
-                                             + std::to_string(lhsLen) + " cycles, right "
-                                             + std::to_string(rhsLen)
-                                             + " cycles (IEEE 1800-2023 16.9.6)");
+                intp->v3error("Intersect sequence length mismatch: left "
+                              + std::to_string(lhsLen) + " cycles, right "
+                              + std::to_string(rhsLen)
+                              + " cycles (IEEE 1800-2023 16.9.6)");
                 return BuildResult::failWithError();
             }
             return buildAndCombiner(intp->lhsp(), intp->rhsp(), entryNode, intp->fileline());
@@ -873,18 +862,7 @@ public:
     // Emit NFA as hardware. Two-phase: Links combinational, Edges registered.
     // acceptCondp = condition on the accept Link (from BuildResult::finalCondp).
     // Returns !reject expression for assert, or accept expression for cover.
-    // If outAcceptpp is non-null, the accept expression is stored there
-    // (caller must deleteTree when done). Used for standalone sequences
-    // with pass handlers to avoid vacuous-pass spurious firings.
-    // disableCntVarp / snapshotVarp: when non-null, use the IEEE-correct
-    // disableCnt snapshot mechanism instead of the direct !disable gate on
-    // state register NBAs. The disableCnt counter increments on the rising
-    // edge of the disable expression, and snapshotVarp captures the counter
-    // value at each evaluation start (in Phase 2 NBA). The terminal check
-    // then gates on (snapshot == disableCnt) to detect whether disable
-    // fired during the evaluation. Required for non-constant disable iff
-    // with standalone sequences where the direct !disable gate misses the
-    // disable cycle due to Verilator's NBA scheduling.
+    // outAcceptpp: if non-null, stores the accept expression (caller owns).
     AstNodeExpr* emit(FileLine* flp, const SvaNfa& nfa, AstNodeExpr* triggerExprp,
                       AstSenTree* senTreep, AstNodeExpr* acceptCondp, bool isCover,
                       AstNodeExpr* disableExprp = nullptr, bool negated = false,
@@ -944,7 +922,7 @@ public:
                 continue;
             }
             if (!needsReg[i]) continue;
-            if (i == nfa.startNode || nfa.nodes[i].isAccept || nfa.nodes[i].isReject) continue;
+            if (i == nfa.startNode || nfa.nodes[i].isAccept) continue;
             const std::string varName = baseName + "__s" + std::to_string(i);
             AstVar* const varp
                 = new AstVar{flp, VVarType::MODULETEMP, varName, m_modp->findBitDType()};
@@ -1037,7 +1015,7 @@ public:
             for (const auto& edge : nfa.edges) {
                 if (edge.consumesCycle) continue;
                 if (!stateSig[edge.fromId]) continue;
-                if (nfa.nodes[edge.toId].isAccept || nfa.nodes[edge.toId].isReject) continue;
+                if (nfa.nodes[edge.toId].isAccept) continue;
                 // Reject sinks exist only as Phase 3a rejectOnFail targets;
                 // they have no "active" semantics and must not appear in
                 // stateSig propagation.
@@ -1611,6 +1589,9 @@ class AssertNfaVisitor final : public VNVisitor {
     SvaNfaEmitter* m_emitterp = nullptr;
     V3UniqueNames m_propVarNames{"__Vpropvar"};
     V3UniqueNames m_disableCntNames{"__VnfaDis"};
+    // Recursion guard for inlineNamedProperty: tracks properties currently
+    // being inlined on the call stack to detect self-referential definitions.
+    std::set<const AstProperty*> m_inliningProps;
 
     // Extract body expression from an AstSequence definition.
     // Skips port AstVar nodes at the front of stmtsp().
@@ -1636,6 +1617,20 @@ class AssertNfaVisitor final : public VNVisitor {
     // assertion's PropSpec. Mirrors V3AssertPre::substitutePropertyCall.
     void inlineNamedProperty(AstPropSpec* outerSpecp, AstFuncRef* funcrefp,
                              const AstProperty* propyp) {
+        // Recursion guard: self-referential or mutually-recursive properties
+        // would cause infinite inlining. IEEE 1800-2023 16.12.1 requires
+        // that property definitions not be recursive.
+        if (m_inliningProps.count(propyp)) {
+            funcrefp->v3error("Recursive property reference not allowed"
+                              " (IEEE 1800-2023 16.12.1)");
+            return;
+        }
+        m_inliningProps.insert(propyp);
+        struct Guard final {
+            std::set<const AstProperty*>& setr;
+            const AstProperty* keyp;
+            ~Guard() { setr.erase(keyp); }
+        } guard{m_inliningProps, propyp};
         AstPropSpec* propExprp = getPropertyExprp(propyp);
         UASSERT_OBJ(propExprp, funcrefp, "Property has no body PropSpec");
         propExprp = propExprp->cloneTree(false);
@@ -2121,15 +2116,7 @@ class AssertNfaVisitor final : public VNVisitor {
         // failure in the same clock cycle, the fail handler must fire once
         // per failing thread (IEEE 1800-2023 concurrent assertion semantics).
         //
-        // Strategy: for each required-step source src_i (i >= 1), emit an
-        // extra always block that fires the fail handler when BOTH src_i AND
-        // at least one of the earlier sources (src_0 .. src_{i-1}) is true.
-        // This ensures exactly N total fires when N sources are simultaneously
-        // active: one from the main assertion (OR) plus N-1 extras.
-        //
-        // Note: only inject extras when there are >= 2 required-step sources,
-        // since a single source is already handled correctly by the main
-        // assertion. Also requires a fail handler and a valid sensitivity.
+        // Exactly N fires when N sources are simultaneously active
         if (requiredStepSrcs.size() >= 2 && assertWithFailp && assertWithFailp->failsp()
             && perSrcSenTreep) {
             AstNode* const failsp = assertWithFailp->failsp();
