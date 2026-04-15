@@ -18,7 +18,7 @@
 //  - Convert multi-cycle SVA sequences/properties into NFA graphs.
 //  - Emit module-level state registers driven by AstAlways blocks.
 //  - Replace converted assertions with combinational accept/reject checks
-//    so V3AssertProp/V3AssertPre see no multi-cycle SExpr.
+//    so V3AssertPre sees no multi-cycle SExpr (unsupported ones fall through).
 //
 //*************************************************************************
 
@@ -1513,50 +1513,6 @@ class AssertNfaVisitor final : public VNVisitor {
         FileLine* const flp = assertp->fileline();
         const bool isCover = VN_IS(assertp, Cover);
 
-        // For standalone sequences with non-constant disable iff, use the disableCnt snapshot
-        // mechanism: !disable gate misses the disable cycle when disable depends on NBA-updated
-        // variables. A counter increments at posedge(disable) (reactive region); a snapshot
-        // captures the count at evaluation start (Phase-2 NBA). Terminal check: snapshot !=
-        // counter => disable fired during the evaluation.
-        AstVar* disableCntVarp = nullptr;
-        AstVar* snapshotVarp = nullptr;
-        // Fall back to !disable gate if disable contains $sampled (can't use posedge).
-        const bool disableHasSampled
-            = disableExprp && disableExprp->exists([](const AstSampled*) { return true; });
-        if (disableExprp && !parts.hasImplication && !VN_IS(disableExprp, Const)
-            && !disableHasSampled) {
-            AstNodeDType* const u32DTypep = m_modp->findBasicDType(VBasicDTypeKwd::UINT32);
-            const std::string cntName = m_disableCntNames.get("");
-            disableCntVarp = new AstVar{flp, VVarType::MODULETEMP, cntName, u32DTypep};
-            disableCntVarp->lifetime(VLifetime::STATIC_EXPLICIT);
-            m_modp->addStmtsp(disableCntVarp);
-
-            AstNodeExpr* const rdRefp = new AstVarRef{flp, disableCntVarp, VAccess::READ};
-            AstNodeExpr* const wrRefp = new AstVarRef{flp, disableCntVarp, VAccess::WRITE};
-            AstNodeExpr* const incrExprp
-                = new AstAdd{flp, rdRefp, new AstConst{flp, AstConst::WidthedValue{}, 32, 1u}};
-            incrExprp->dtypeFrom(disableCntVarp);
-            AstAssign* const incrAssignp = new AstAssign{flp, wrRefp, incrExprp};
-            AstSenItem* const senItemp
-                = new AstSenItem{flp, VEdgeType::ET_POSEDGE, disableExprp->cloneTreePure(false)};
-            AstSenTree* const disSenp = new AstSenTree{flp, senItemp};
-            AstAlways* const disAlwaysp
-                = new AstAlways{flp, VAlwaysKwd::ALWAYS, disSenp, incrAssignp};
-            m_modp->addStmtsp(disAlwaysp);
-
-            const std::string snapName = m_disableCntNames.get("") + "__snap";
-            snapshotVarp = new AstVar{flp, VVarType::MODULETEMP, snapName, u32DTypep};
-            snapshotVarp->lifetime(VLifetime::STATIC_EXPLICIT);
-            m_modp->addStmtsp(snapshotVarp);
-
-            // Unlink so V3Assert doesn't add its own !disable wrapper (wrong region).
-            if (propSpecp && propSpecp->disablep()) {
-                AstNodeExpr* const oldDisp = propSpecp->disablep();
-                oldDisp->unlinkFrBack();
-            }
-        }
-        const bool disableExprUnlinked = disableCntVarp && disableExprp;
-
         SvaNfa nfa;
         SvaNfaBuilder builder{nfa};
 
@@ -1566,17 +1522,16 @@ class AssertNfaVisitor final : public VNVisitor {
 
             const BuildResult antResult = builder.buildExpr(parts.triggerExprp, nfa.startNode);
             if (!antResult.valid()) {
-                if (!antResult.errorEmitted) {
-                    assertp->v3warn(E_UNSUPPORTED, "Unsupported: assertion antecedent contains SVA"
-                                                   " construct not yet supported by NFA engine");
+                // Fall through to V3AssertPre for unsupported constructs.
+                // Only replace with BitFalse on real semantic errors.
+                if (antResult.errorEmitted) {
+                    if (propSpecp) {
+                        AstNode* const innerPropp = propSpecp->propp();
+                        innerPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
+                        VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
+                    }
                 }
                 if (senTreeOwned) senTreep->deleteTree();
-                if (disableExprUnlinked) disableExprp->deleteTree();
-                if (propSpecp) {
-                    AstNode* const innerPropp = propSpecp->propp();
-                    innerPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
-                    VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
-                }
                 return;
             }
 
@@ -1609,28 +1564,62 @@ class AssertNfaVisitor final : public VNVisitor {
         }
 
         if (!result.valid()) {
-            if (!result.errorEmitted) {
-                assertp->v3warn(E_UNSUPPORTED,
-                                "Unsupported: assertion contains SVA construct not yet"
-                                " supported by NFA engine (e.g. intersect, sequence and,"
-                                " complex throughout)");
+            // Fall through to V3AssertPre for unsupported constructs.
+            // Only replace with BitFalse on real semantic errors.
+            if (result.errorEmitted) {
+                if (propSpecp) {
+                    AstNode* const innerPropp = propSpecp->propp();
+                    innerPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
+                    VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
+                } else {
+                    AstNode* const oldPropp = assertp->propp();
+                    oldPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
+                    VL_DO_DANGLING(pushDeletep(oldPropp), oldPropp);
+                }
             }
             if (senTreeOwned) senTreep->deleteTree();
-            if (disableExprUnlinked) disableExprp->deleteTree();
-            if (propSpecp) {
-                AstNode* const innerPropp = propSpecp->propp();
-                innerPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
-                VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
-            } else {
-                AstNode* const oldPropp = assertp->propp();
-                oldPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
-                VL_DO_DANGLING(pushDeletep(oldPropp), oldPropp);
-            }
             return;
         }
 
-        // For standalone sequences with pass handlers, gate on accept to prevent
-        // vacuous-pass firings (!reject is 1 on non-terminal cycles).
+        // Build succeeded. Now create snapshot mechanism for disable iff if needed.
+        // Done here (not before build) so failed builds don't pollute the AST.
+        AstVar* disableCntVarp = nullptr;
+        AstVar* snapshotVarp = nullptr;
+        const bool disableHasSampled
+            = disableExprp && disableExprp->exists([](const AstSampled*) { return true; });
+        if (disableExprp && !parts.hasImplication && !VN_IS(disableExprp, Const)
+            && !disableHasSampled) {
+            AstNodeDType* const u32DTypep = m_modp->findBasicDType(VBasicDTypeKwd::UINT32);
+            const std::string cntName = m_disableCntNames.get("");
+            disableCntVarp = new AstVar{flp, VVarType::MODULETEMP, cntName, u32DTypep};
+            disableCntVarp->lifetime(VLifetime::STATIC_EXPLICIT);
+            m_modp->addStmtsp(disableCntVarp);
+
+            AstNodeExpr* const rdRefp = new AstVarRef{flp, disableCntVarp, VAccess::READ};
+            AstNodeExpr* const wrRefp = new AstVarRef{flp, disableCntVarp, VAccess::WRITE};
+            AstNodeExpr* const incrExprp
+                = new AstAdd{flp, rdRefp, new AstConst{flp, AstConst::WidthedValue{}, 32, 1u}};
+            incrExprp->dtypeFrom(disableCntVarp);
+            AstAssign* const incrAssignp = new AstAssign{flp, wrRefp, incrExprp};
+            AstSenItem* const senItemp
+                = new AstSenItem{flp, VEdgeType::ET_POSEDGE, disableExprp->cloneTreePure(false)};
+            AstSenTree* const disSenp = new AstSenTree{flp, senItemp};
+            AstAlways* const disAlwaysp
+                = new AstAlways{flp, VAlwaysKwd::ALWAYS, disSenp, incrAssignp};
+            m_modp->addStmtsp(disAlwaysp);
+
+            const std::string snapName = m_disableCntNames.get("") + "__snap";
+            snapshotVarp = new AstVar{flp, VVarType::MODULETEMP, snapName, u32DTypep};
+            snapshotVarp->lifetime(VLifetime::STATIC_EXPLICIT);
+            m_modp->addStmtsp(snapshotVarp);
+
+            if (propSpecp && propSpecp->disablep()) {
+                AstNodeExpr* const oldDisp = propSpecp->disablep();
+                oldDisp->unlinkFrBack();
+            }
+        }
+        const bool disableExprUnlinked = disableCntVarp && disableExprp;
+
         AstAssert* const assertAssertp = VN_CAST(assertp, Assert);
         const bool needAccept
             = !isCover && !parts.hasImplication && assertAssertp && assertAssertp->passsp();

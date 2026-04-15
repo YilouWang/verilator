@@ -706,9 +706,9 @@ private:
     }
     void visit(AstSConsRep* nodep) override {
         // IEEE 1800-2023 16.9.2 -- Lower standalone exact [*N] (N >= 2) via saturating counter.
-        // Range/unbounded forms and SExpr-contained forms are lowered by V3AssertProp.
+        // Range/unbounded forms and SExpr-contained forms are lowered by V3AssertNfa.
         iterateChildren(nodep);
-        if (nodep->unbounded() || nodep->maxCountp()) return;  // Handled by V3AssertProp
+        if (nodep->unbounded() || nodep->maxCountp()) return;  // Handled by V3AssertNfa
         const AstConst* const constp = VN_CAST(nodep->countp(), Const);
         if (VL_UNLIKELY(!constp || constp->toSInt() < 1)) {
             nodep->v3fatalSrc("Consecutive repetition count must be a positive constant"
@@ -1097,7 +1097,7 @@ private:
 
         if (AstPExpr* const pexprp = VN_CAST(rhsp, PExpr)) {
             // Implication with sequence expression on RHS (IEEE 1800-2023 16.11, 16.12.7).
-            // The PExpr was already lowered from the property expression by V3AssertProp.
+            // The PExpr was lowered from the property expression earlier in this pass.
             // Wrap the PExpr body with the antecedent check so the sequence only
             // starts when the antecedent holds.
             AstNodeExpr* condp;
