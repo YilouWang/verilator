@@ -2060,7 +2060,7 @@ class AssertNfaVisitor final : public VNVisitor {
                 passsp->unlinkFrBackWithNext();
                 // Pass handler: fires when !reject && accept.
                 assertAssertp->addPasssp(new AstIf{flp, acceptExprp->cloneTreePure(false),
-                                                    passsp->cloneTreePure(false), nullptr});
+                                                   passsp->cloneTreePure(false), nullptr});
                 // Fail handler prefix: fires when reject && accept (simultaneous case).
                 if (AstNode* const failsp = assertAssertp->failsp()) {
                     failsp->addHereThisAsNext(
