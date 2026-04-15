@@ -63,7 +63,6 @@
 [68] triggered e7
 [68] single delay with and var else, fileline:128
 [70] triggered e8
-[70] single delay with negated var stmt, fileline:131
 [72] triggered e8
 [72] single delay with negated var stmt, fileline:131
 [74] triggered e8
@@ -73,7 +72,6 @@
 [78] triggered e8
 [78] single delay with negated var else, fileline:132
 [80] triggered e9
-[80] single delay with negated var brackets stmt, fileline:135
 [82] triggered e9
 [82] single delay with negated var brackets else, fileline:137
 [84] triggered e9
@@ -107,7 +105,6 @@
 [118] triggered e12
 [118] stmt, fileline:        148
 [120] triggered e13
-[120] property, fileline:160
 [122] triggered e13
 [122] property, fileline:161
 [124] triggered e13
@@ -129,6 +126,7 @@
 [140] else, fileline:        171
 [142] triggered e15
 [144] triggered e15
+[144] else, fileline:        171
 [144] else, fileline:        171
 [146] triggered e15
 [148] triggered e15

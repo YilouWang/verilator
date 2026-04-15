@@ -483,7 +483,10 @@ class SvaNfaBuilder final {
             || VN_IS(exprp, SIntersect) || VN_IS(exprp, SNonConsRep)) {
             // rangeMidSources should be empty here because the chain path
             // is only taken for pure-boolean RHS.
-            return buildExpr(exprp, currentNode);
+            // Pass isTopLevelStep through so that required-step boolean checks
+            // inside nested RHS sequences (e.g. A ##1 (B ##1 C)) are correctly
+            // marked as rejectOnFail when this is a top-level evaluation.
+            return buildExpr(exprp, currentNode, isTopLevelStep);
         }
         // Simple boolean RHS: this is the final condition.
         return {currentNode, exprp, std::move(rangeMidSources)};
@@ -886,7 +889,8 @@ public:
                       AstSenTree* senTreep, AstNodeExpr* acceptCondp, bool isCover,
                       AstNodeExpr* disableExprp = nullptr, bool negated = false,
                       AstNodeExpr** outAcceptpp = nullptr, AstVar* disableCntVarp = nullptr,
-                      AstVar* snapshotVarp = nullptr) {
+                      AstVar* snapshotVarp = nullptr,
+                      std::vector<AstNodeExpr*>* outRequiredStepSrcsp = nullptr) {
         const std::string baseName = m_names.get("");
         const int N = static_cast<int>(nfa.nodes.size());
 
@@ -1353,6 +1357,13 @@ public:
         // consequent's first boolean (b) is false -- the attempt never
         // leaves the start state, so no later terminal-based reject can
         // ever fire for it.
+        //
+        // When outRequiredStepSrcsp is non-null, individual sources are
+        // also collected so that the caller can emit extra fail-handler
+        // fires for the case where two or more independent evaluation
+        // threads each hit a required-step failure in the same clock cycle.
+        // The main reject expression (requiredStepRejectp) is always built
+        // as the OR of all sources and remains the primary fail trigger.
         AstNodeExpr* requiredStepRejectp = nullptr;
         for (const auto& edge : nfa.edges) {
             if (!edge.rejectOnFail) continue;
@@ -1364,6 +1375,10 @@ public:
             notCondp->dtypeSetBit();
             AstNodeExpr* const failp = new AstAnd{flp, srcSigp, notCondp};
             failp->dtypeSetBit();
+            if (outRequiredStepSrcsp) {
+                // Also collect individually for extra-fire logic in caller.
+                outRequiredStepSrcsp->push_back(failp->cloneTreePure(false));
+            }
             requiredStepRejectp = orExprs(flp, requiredStepRejectp, failp);
         }
 
@@ -2030,12 +2045,29 @@ class AssertNfaVisitor final : public VNVisitor {
             = !isCover && !parts.hasImplication && assertAssertp && assertAssertp->passsp();
         AstNodeExpr* acceptExprp = nullptr;
 
+        // Collect individual required-step reject sources when there is a
+        // fail handler to invoke. Each source represents a distinct evaluation
+        // thread that failed its required first (or mid-sequence) boolean
+        // check. Using individual sources instead of a single OR lets the
+        // fail handler fire once per failing thread in the same cycle.
+        AstAssert* const assertWithFailp = VN_CAST(assertp, Assert);
+        const bool needPerSrcFail = !isCover && !parts.hasImplication && assertWithFailp
+                                    && assertWithFailp->failsp();
+        std::vector<AstNodeExpr*> requiredStepSrcs;
+
         // Emit NFA hardware
         AstNodeExpr* const alwaysTriggerp = new AstConst{flp, AstConst::BitTrue{}};
         AstNodeExpr* const outputExprp = m_emitterp->emit(
             flp, nfa, alwaysTriggerp, senTreep, result.finalCondp, isCover,
             disableExprp ? disableExprp->cloneTreePure(false) : nullptr, negated,
-            needAccept ? &acceptExprp : nullptr, disableCntVarp, snapshotVarp);
+            needAccept ? &acceptExprp : nullptr, disableCntVarp, snapshotVarp,
+            needPerSrcFail ? &requiredStepSrcs : nullptr);
+
+        // Save senTree clone for extra-fail always blocks before senTreep may
+        // be deleted. Only needed when >= 2 required-step sources exist (single
+        // source is handled correctly by the main assertion's OR'd reject).
+        AstSenTree* const perSrcSenTreep
+            = (requiredStepSrcs.size() >= 2) ? senTreep->cloneTree(false) : nullptr;
 
         // Clean up locally-owned temporaries (emit cloned them)
         alwaysTriggerp->deleteTree();
@@ -2048,23 +2080,29 @@ class AssertNfaVisitor final : public VNVisitor {
         // allocated node (backp()==nullptr means it has no AST parent).
         if (result.finalCondp && !result.finalCondp->backp()) { result.finalCondp->deleteTree(); }
 
-        // Gate pass action with accept signal.
-        // Crucially, also prepend a gated copy to the fail handler so that when
-        // reject=1 && accept=1 in the same cycle (different overlapping instances),
-        // both pass and fail actions fire independently (IEEE 1800-2023 16.12).
-        // Keeping passsp only in the assertion's pass handler would suppress it
-        // whenever reject=1, producing {fails:1, passs:0} instead of {fails:1, passs:1}.
+        // Gate pass action with accept signal to prevent vacuous-pass firings.
+        // For standalone sequences (no implication) the assertion output is
+        // `!reject`, which is vacuously 1 on every cycle where no instance has
+        // completed. Without gating, the pass handler would fire spuriously on
+        // every such cycle. Wrapping it in `if (accept_expr)` ensures it fires
+        // only when an instance actually completed successfully this cycle.
+        // For negated properties, accept_expr is reject_of_inner_P (see emit()).
         if (needAccept && acceptExprp) {
             AstNode* passsp = assertAssertp->passsp();
             if (passsp) {
                 passsp->unlinkFrBackWithNext();
-                // Pass handler: fires when !reject && accept.
+                // Gate pass handler: fires only when accept_expr is true.
+                // Use cloneTree (not cloneTreePure) for statement nodes that
+                // may contain side-effecting calls such as $display.
                 assertAssertp->addPasssp(new AstIf{flp, acceptExprp->cloneTreePure(false),
-                                                   passsp->cloneTreePure(false), nullptr});
-                // Fail handler prefix: fires when reject && accept (simultaneous case).
+                                                    passsp->cloneTree(false), nullptr});
+                // Fail-handler prefix: fires when reject=1 && accept=1 (different
+                // overlapping instances: one fails, another passes). Without this,
+                // the pass action is suppressed whenever reject=1, producing
+                // {fails:1, passs:0} instead of {fails:1, passs:1} (IEEE 16.12).
                 if (AstNode* const failsp = assertAssertp->failsp()) {
                     failsp->addHereThisAsNext(
-                        new AstIf{flp, acceptExprp, passsp->cloneTreePure(false), nullptr});
+                        new AstIf{flp, acceptExprp, passsp->cloneTree(false), nullptr});
                 } else {
                     acceptExprp->deleteTree();
                 }
@@ -2072,6 +2110,61 @@ class AssertNfaVisitor final : public VNVisitor {
             } else {
                 acceptExprp->deleteTree();
             }
+        }
+
+        // Extra fail-handler fires for simultaneous required-step failures.
+        //
+        // The main assertion expression already includes ALL required-step
+        // reject sources (via requiredStepRejectp = OR of all sources) and
+        // fires the fail handler once when any source triggers. When two or
+        // more INDEPENDENT evaluation threads each hit a required-step
+        // failure in the same clock cycle, the fail handler must fire once
+        // per failing thread (IEEE 1800-2023 concurrent assertion semantics).
+        //
+        // Strategy: for each required-step source src_i (i >= 1), emit an
+        // extra always block that fires the fail handler when BOTH src_i AND
+        // at least one of the earlier sources (src_0 .. src_{i-1}) is true.
+        // This ensures exactly N total fires when N sources are simultaneously
+        // active: one from the main assertion (OR) plus N-1 extras.
+        //
+        // Note: only inject extras when there are >= 2 required-step sources,
+        // since a single source is already handled correctly by the main
+        // assertion. Also requires a fail handler and a valid sensitivity.
+        if (requiredStepSrcs.size() >= 2 && assertWithFailp && assertWithFailp->failsp()
+            && perSrcSenTreep) {
+            AstNode* const failsp = assertWithFailp->failsp();
+            // Build cumulative OR of sources seen so far.
+            // All srcp entries are independently owned; clone them for each use.
+            AstNodeExpr* cumulativeOrp = requiredStepSrcs[0]->cloneTreePure(false);
+            for (size_t i = 1; i < requiredStepSrcs.size(); ++i) {
+                AstNodeExpr* const srcp = requiredStepSrcs[i];
+                // Extra always block: fires when src_i AND any previous src.
+                // This represents a second (or later) simultaneous thread fail.
+                AstNodeExpr* const condp = new AstAnd{flp,
+                                                      srcp->cloneTreePure(false),
+                                                      cumulativeOrp->cloneTreePure(false)};
+                condp->dtypeSetBit();
+                // cloneTree(true) copies the full sibling list so multi-statement
+                // else blocks are reproduced completely.
+                AstNode* const failClonep = failsp->cloneTree(true);
+                AstIf* const ifp = new AstIf{flp, condp, failClonep, nullptr};
+                AstAlways* const alwaysp = new AstAlways{
+                    flp, VAlwaysKwd::ALWAYS, perSrcSenTreep->cloneTree(false), ifp};
+                m_modp->addStmtsp(alwaysp);
+                // Extend cumulative OR to include this source for next iteration.
+                AstNodeExpr* const extOrp
+                    = new AstOr{flp, cumulativeOrp, srcp->cloneTreePure(false)};
+                extOrp->dtypeSetBit();
+                cumulativeOrp = extOrp;
+            }
+            // Free all collected sources and the cumulative OR.
+            for (AstNodeExpr* const srcp : requiredStepSrcs) srcp->deleteTree();
+            cumulativeOrp->deleteTree();
+            perSrcSenTreep->deleteTree();
+        } else {
+            // Single source or no fail handler: no extra fires needed.
+            for (AstNodeExpr* const srcp : requiredStepSrcs) srcp->deleteTree();
+            if (perSrcSenTreep) perSrcSenTreep->deleteTree();
         }
 
         // Replace inner property with output expression
