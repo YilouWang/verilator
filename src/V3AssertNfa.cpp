@@ -496,12 +496,14 @@ class SvaNfaBuilder final {
         }
         const int mergeNode = scopedCreateNode();
         if (lhs.finalCondp) {
-            guardedLink(lhs.termNode, mergeNode, sampled(lhs.finalCondp->cloneTreePure(false)), flp);
+            guardedLink(lhs.termNode, mergeNode, sampled(lhs.finalCondp->cloneTreePure(false)),
+                        flp);
         } else {
             guardedLink(lhs.termNode, mergeNode, flp);
         }
         if (rhs.finalCondp) {
-            guardedLink(rhs.termNode, mergeNode, sampled(rhs.finalCondp->cloneTreePure(false)), flp);
+            guardedLink(rhs.termNode, mergeNode, sampled(rhs.finalCondp->cloneTreePure(false)),
+                        flp);
         } else {
             guardedLink(rhs.termNode, mergeNode, flp);
         }
@@ -797,9 +799,8 @@ public:
                 doneROrp->dtypeSetBit();
                 AstNodeExpr* const bothDonep = new AstAnd{flp, doneLOrp, doneROrp};
                 bothDonep->dtypeSetBit();
-                AstNodeExpr* const oneNowp
-                    = new AstOr{flp, acceptLNowp->cloneTreePure(false),
-                                acceptRNowp->cloneTreePure(false)};
+                AstNodeExpr* const oneNowp = new AstOr{flp, acceptLNowp->cloneTreePure(false),
+                                                       acceptRNowp->cloneTreePure(false)};
                 oneNowp->dtypeSetBit();
                 AstNodeExpr* const acceptp = new AstAnd{flp, bothDonep, oneNowp};
                 acceptp->dtypeSetBit();
