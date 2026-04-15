@@ -479,9 +479,8 @@ class SvaNfaBuilder final {
         if (VN_IS(exprp, SExpr) || VN_IS(exprp, SThroughout) || VN_IS(exprp, SAnd)
             || VN_IS(exprp, SOr) || VN_IS(exprp, SConsRep) || VN_IS(exprp, SGotoRep)
             || VN_IS(exprp, SIntersect) || VN_IS(exprp, SNonConsRep)) {
-            repp->v3warn(E_UNSUPPORTED,
-                         "Unsupported: multi-cycle sequence expression inside"
-                         " consecutive repetition (IEEE 1800-2023 16.9.2)");
+            repp->v3warn(E_UNSUPPORTED, "Unsupported: multi-cycle sequence expression inside"
+                                        " consecutive repetition (IEEE 1800-2023 16.9.2)");
             return BuildResult::failWithError();
         }
         const int minN = getConstInt(repp->countp());
@@ -806,9 +805,8 @@ public:
             const int rhsLen = fixedLength(intp->rhsp());
             if (lhsLen < 0 || rhsLen < 0) return BuildResult::fail();
             if (lhsLen != rhsLen) {
-                intp->v3error("Intersect sequence length mismatch: left "
-                              + std::to_string(lhsLen) + " cycles, right "
-                              + std::to_string(rhsLen)
+                intp->v3error("Intersect sequence length mismatch: left " + std::to_string(lhsLen)
+                              + " cycles, right " + std::to_string(rhsLen)
                               + " cycles (IEEE 1800-2023 16.9.6)");
                 return BuildResult::failWithError();
             }
