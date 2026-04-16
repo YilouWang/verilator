@@ -1,0 +1,6 @@
+%Error-UNSUPPORTED: t/t_assert_recursive_prop_bad.v:11:12: Unsupported: Recursive property call: 'p'
+                                                         : ... note: In instance 't'
+   11 |   property p;
+      |            ^
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.047
+%Error: Exiting due to 1 error(s)

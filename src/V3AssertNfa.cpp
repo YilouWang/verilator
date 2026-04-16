@@ -17,7 +17,7 @@
 //
 //  - Convert multi-cycle SVA sequences/properties into NFA graphs.
 //  - Emit module-level state registers driven by AstAlways blocks.
-//  - Replace converted assertions with combinational accept/reject checks
+//  - Replace converted assertions with combinational match/reject checks
 //    so V3AssertPre sees no multi-cycle SExpr (unsupported ones fall through).
 //
 //*************************************************************************
@@ -27,6 +27,7 @@
 #include "V3AssertNfa.h"
 
 #include "V3Const.h"
+#include "V3Graph.h"
 #include "V3Task.h"
 #include "V3UniqueNames.h"
 
@@ -36,111 +37,160 @@
 VL_DEFINE_DEBUG_FUNCTIONS;
 
 //######################################################################
-// NFA Graph Data Structures
+// NFA Graph Data Structures (V3Graph-derived per upstream convention)
 
 namespace {
 
-struct SvaNfaNode final {
-    int id;
-    bool isAccept = false;
-    // Owned throughout-guard clones; if any drop while node is active, reject fires
-    // per IEEE 1800-2023 16.9.9.
-    std::vector<AstNodeExpr*> throughoutConds;
-    // Counter FSM node for ##[M:N] when N-M > kChainLimit
-    bool isCounter = false;
-    int counterMin = 0;
-    int counterMax = 0;
-    // Liveness terminal (IEEE weak semantics): reject must not fire from this source.
-    bool isUnbounded = false;
-    // Temporal sequence AND combiner per IEEE 1800-2023 16.9.5
-    bool isAndCombiner = false;
-    int andLhsTermId = -1;
-    int andRhsTermId = -1;
-    AstNodeExpr* andLhsCondp = nullptr;  // OWNED; may be null
-    AstNodeExpr* andRhsCondp = nullptr;  // OWNED; may be null
-    // Reject sink for SAnd rejectOnFail wiring; not a stateSig source
-    bool isRejectSink = false;
+class SvaStateVertex;
+
+// Per-vertex algorithm data, stored via V3GraphVertex::userp() during lowering
+struct SvaVertexData final {
+    AstVar* stateVarp = nullptr;  // NBA state register for this vertex
+    AstVar* counterActiveVarp = nullptr;  // Counter FSM active flag
+    AstVar* counterCountVarp = nullptr;  // Counter FSM count register
+    AstVar* doneLVarp = nullptr;  // SAnd LHS done-latch
+    AstVar* doneRVarp = nullptr;  // SAnd RHS done-latch
+    AstNodeExpr* stateSigp = nullptr;  // Combinational state signal (owned during lowering)
+    bool needsReg = false;  // True if vertex has incoming clocked edge
 };
 
-struct SvaNfaEdge final {
-    int fromId;
-    int toId;
-    AstNodeExpr* condp = nullptr;  // nullptr = unconditional; OWNED by NFA
-    bool consumesCycle;  // true = Edge (##1), false = Link (##0/boolean)
-    // Reject when source is active and condp is false. Set only on the
-    // outermost required-step Link; nested / optional Links must not set this.
-    bool rejectOnFail = false;
+// NFA state vertex -- one per NFA position in the sequence evaluation
+class SvaStateVertex final : public V3GraphVertex {
+    VL_RTTI_IMPL(SvaStateVertex, V3GraphVertex)
+public:
+    // True if this is the sequence-match terminal vertex
+    bool m_isMatch = false;
+    // Owned throughout-guard condition clones; IEEE 1800-2023 16.9.9
+    std::vector<AstNodeExpr*> m_throughoutConds;
+    // Counter FSM vertex for ##[M:N] when N-M > kChainLimit
+    bool m_isCounter = false;
+    int m_counterMin = 0;  // Counter window minimum
+    int m_counterMax = 0;  // Counter window maximum
+    // Liveness terminal (IEEE weak semantics): reject must not fire from this source
+    bool m_isUnbounded = false;
+    // Temporal sequence AND combiner; IEEE 1800-2023 16.9.5
+    bool m_isAndCombiner = false;
+    SvaStateVertex* m_andLhsTermp = nullptr;  // LHS sub-NFA terminal vertex
+    SvaStateVertex* m_andRhsTermp = nullptr;  // RHS sub-NFA terminal vertex
+    AstNodeExpr* m_andLhsCondp = nullptr;  // OWNED; LHS final condition (may be nullptr)
+    AstNodeExpr* m_andRhsCondp = nullptr;  // OWNED; RHS final condition (may be nullptr)
+    // Reject sink for SAnd rejectOnFail wiring; not a state-signal source
+    bool m_isRejectSink = false;
+
+    // CONSTRUCTORS
+    explicit SvaStateVertex(V3Graph* graphp)
+        : V3GraphVertex{graphp} {}
+    ~SvaStateVertex() override {
+        for (AstNodeExpr* cp : m_throughoutConds) cp->deleteTree();
+        if (m_andLhsCondp) m_andLhsCondp->deleteTree();
+        if (m_andRhsCondp) m_andRhsCondp->deleteTree();
+    }
+    // METHODS
+    string name() const override { return "s" + cvtToStr(color()); }
+    string dotColor() const override {
+        if (m_isMatch) return "red";
+        if (m_isCounter) return "blue";
+        if (m_isAndCombiner) return "purple";
+        return "black";
+    }
+    // Access per-vertex algorithm data (valid only during lowering phase)
+    SvaVertexData* datap() const {
+        return static_cast<SvaVertexData*>(userp());
+    }
 };
 
-struct SvaNfa final {
-    int startNode = -1;
-    int acceptNode = -1;
-    std::vector<SvaNfaNode> nodes;
-    std::vector<SvaNfaEdge> edges;
+// NFA transition edge -- clocked (##1) or combinational link (##0)
+class SvaTransEdge final : public V3GraphEdge {
+    VL_RTTI_IMPL(SvaTransEdge, V3GraphEdge)
+public:
+    AstNodeExpr* m_condp;  // Transition condition; nullptr = unconditional; OWNED
+    bool m_consumesCycle;  // true = clocked edge (##1), false = link (##0/boolean)
+    // Reject when source is active and condp is false; set only on
+    // outermost required-step Link
+    bool m_rejectOnFail = false;
 
-    ~SvaNfa() {
-        for (auto& edge : edges) {
-            if (edge.condp) {
-                edge.condp->deleteTree();
-                edge.condp = nullptr;
+    // CONSTRUCTORS
+    SvaTransEdge(V3Graph* graphp, V3GraphVertex* fromp, V3GraphVertex* top,
+                 AstNodeExpr* condp, bool consumesCycle)
+        : V3GraphEdge{graphp, fromp, top, /*weight=*/1}
+        , m_condp{condp}
+        , m_consumesCycle{consumesCycle} {}
+    ~SvaTransEdge() override {
+        if (m_condp) m_condp->deleteTree();
+    }
+    // METHODS
+    string dotLabel() const override { return m_consumesCycle ? "##1" : "link"; }
+    string dotStyle() const override { return m_consumesCycle ? "" : "dashed"; }
+    // Typed accessors for NFA vertices
+    SvaStateVertex* fromVtxp() const {
+        return static_cast<SvaStateVertex*>(fromp());
+    }
+    SvaStateVertex* toVtxp() const {
+        return static_cast<SvaStateVertex*>(top());
+    }
+};
+
+// NFA graph container
+class SvaGraph final {
+public:
+    V3Graph m_graph;  // Owns all vertices and edges
+    SvaStateVertex* m_startVertexp = nullptr;  // Trigger/start vertex
+    SvaStateVertex* m_matchVertexp = nullptr;  // Sequence-match terminal vertex
+
+    // Create a new state vertex
+    SvaStateVertex* createStateVertex() {
+        return new SvaStateVertex{&m_graph};
+    }
+    // Create the match terminal vertex
+    SvaStateVertex* createMatchVertex() {
+        SvaStateVertex* const vtxp = createStateVertex();
+        vtxp->m_isMatch = true;
+        m_matchVertexp = vtxp;
+        return vtxp;
+    }
+    // Add a clocked transition edge (##1)
+    SvaTransEdge* addClockedEdge(SvaStateVertex* fromp, SvaStateVertex* top,
+                                 AstNodeExpr* condp = nullptr) {
+        return new SvaTransEdge{&m_graph, fromp, top, condp, /*consumesCycle=*/true};
+    }
+    // Add a combinational link (##0 / boolean condition)
+    SvaTransEdge* addLink(SvaStateVertex* fromp, SvaStateVertex* top,
+                          AstNodeExpr* condp = nullptr) {
+        return new SvaTransEdge{&m_graph, fromp, top, condp, /*consumesCycle=*/false};
+    }
+    // Collect all edges into a flat vector for iteration.
+    // Used by the lowering phase which needs global edge scans.
+    std::vector<const SvaTransEdge*> allEdges() const {
+        std::vector<const SvaTransEdge*> result;
+        for (const V3GraphVertex& vtxr : m_graph.vertices()) {
+            for (const V3GraphEdge& er : vtxr.outEdges()) {
+                result.push_back(static_cast<const SvaTransEdge*>(&er));
             }
         }
-        for (auto& node : nodes) {
-            for (auto* cp : node.throughoutConds) cp->deleteTree();
-            node.throughoutConds.clear();
-            if (node.andLhsCondp) {
-                node.andLhsCondp->deleteTree();
-                node.andLhsCondp = nullptr;
-            }
-            if (node.andRhsCondp) {
-                node.andRhsCondp->deleteTree();
-                node.andRhsCondp = nullptr;
-            }
-        }
-    }
-
-    int createNode() {
-        const int id = static_cast<int>(nodes.size());
-        SvaNfaNode node;
-        node.id = id;
-        nodes.push_back(std::move(node));
-        return id;
-    }
-    int createAcceptNode() {
-        const int id = createNode();
-        nodes[id].isAccept = true;
-        acceptNode = id;
-        return id;
-    }
-    void addClockEdge(int from, int to, AstNodeExpr* condp = nullptr) {
-        edges.push_back(SvaNfaEdge{from, to, condp, true});
-    }
-    void addLink(int from, int to, AstNodeExpr* condp = nullptr) {
-        edges.push_back(SvaNfaEdge{from, to, condp, false});
+        return result;
     }
 };
 
 //######################################################################
-// Builder result: terminal node + optional final condition (accept Link condition).
+// Builder result: terminal vertex + optional final condition (match Link condition).
 struct BuildResult final {
-    int termNode;  // Primary terminal; contributes to both accept and reject (Phase 3).
+    SvaStateVertex* termVertexp;  // Primary terminal; contributes to both match and reject
     AstNodeExpr* finalCondp;  // nullptr = unconditional
-    // Mid-window sources for range delays (pure boolean RHS): accept-only (isUnbounded).
-    std::vector<int> midSources;
-    bool errorEmitted = false;  // Builder already emitted specific error; skip generic.
-    bool valid() const { return termNode >= 0; }
-    static BuildResult fail(bool errored = false) { return {-1, nullptr, {}, errored}; }
-    static BuildResult failWithError() { return {-1, nullptr, {}, true}; }
+    // Mid-window sources for range delays (pure boolean RHS): match-only (isUnbounded)
+    std::vector<SvaStateVertex*> midSources;
+    bool errorEmitted = false;  // Builder already emitted specific error; skip generic
+    bool valid() const { return termVertexp != nullptr; }
+    static BuildResult fail(bool errored = false) { return {nullptr, nullptr, {}, errored}; }
+    static BuildResult failWithError() { return {nullptr, nullptr, {}, true}; }
 };
 
 //######################################################################
 // NFA Builder
 
 class SvaNfaBuilder final {
-    SvaNfa& m_nfa;
-    std::vector<AstNodeExpr*> m_throughoutStack;
-    // Sticky once an unbounded wait is built; nodes created after inherit liveness.
-    bool m_inUnboundedScope = false;
+    SvaGraph& m_graph;  // NFA graph being built
+    std::vector<AstNodeExpr*> m_throughoutStack;  // Active throughout guards (IEEE 16.9.9)
+    bool m_inUnboundedScope = false;  // Sticky: nodes created after inherit liveness
 
     AstNodeExpr* throughoutCond(AstNodeExpr* baseCondp, FileLine* flp) {
         if (m_throughoutStack.empty()) return baseCondp;
@@ -153,12 +203,10 @@ class SvaNfaBuilder final {
                 guardp = clonep;
             } else {
                 guardp = new AstAnd{flp, guardp, clonep};
-                guardp->dtypeSetBit();
             }
         }
         if (baseCondp) {
             guardp = new AstAnd{flp, baseCondp, guardp};
-            guardp->dtypeSetBit();
         }
         return guardp;
     }
@@ -227,71 +275,73 @@ class SvaNfaBuilder final {
         return sp;
     }
 
-    // Create node and inherit throughout guards from current scope (IEEE 16.9.9).
-    int scopedCreateNode() {
-        const int id = m_nfa.createNode();
-        auto& node = m_nfa.nodes[id];
+    // Create vertex and inherit throughout guards from current scope (IEEE 16.9.9).
+    SvaStateVertex* scopedCreateVertex() {
+        SvaStateVertex* const vtxp = m_graph.createStateVertex();
         for (AstNodeExpr* const cp : m_throughoutStack) {
-            node.throughoutConds.push_back(cp->cloneTreePure(false));
+            vtxp->m_throughoutConds.push_back(cp->cloneTreePure(false));
         }
-        if (m_inUnboundedScope) node.isUnbounded = true;
-        return id;
+        if (m_inUnboundedScope) vtxp->m_isUnbounded = true;
+        return vtxp;
     }
 
     // AND current throughout stack into every edge/link (IEEE 16.9.9 invariant).
-    void guardedLink(int from, int to, AstNodeExpr* condp, FileLine* flp) {
-        m_nfa.addLink(from, to, throughoutCond(condp, flp));
+    SvaTransEdge* guardedLink(SvaStateVertex* fromp, SvaStateVertex* top,
+                              AstNodeExpr* condp, FileLine* flp) {
+        return m_graph.addLink(fromp, top, throughoutCond(condp, flp));
     }
-    void guardedLink(int from, int to, FileLine* flp) {
-        m_nfa.addLink(from, to, throughoutCond(nullptr, flp));
+    SvaTransEdge* guardedLink(SvaStateVertex* fromp, SvaStateVertex* top, FileLine* flp) {
+        return m_graph.addLink(fromp, top, throughoutCond(nullptr, flp));
     }
-    void guardedEdge(int from, int to, AstNodeExpr* condp, FileLine* flp) {
-        m_nfa.addClockEdge(from, to, throughoutCond(condp, flp));
+    SvaTransEdge* guardedEdge(SvaStateVertex* fromp, SvaStateVertex* top,
+                              AstNodeExpr* condp, FileLine* flp) {
+        return m_graph.addClockedEdge(fromp, top, throughoutCond(condp, flp));
     }
-    void guardedEdge(int from, int to, FileLine* flp) {
-        m_nfa.addClockEdge(from, to, throughoutCond(nullptr, flp));
+    SvaTransEdge* guardedEdge(SvaStateVertex* fromp, SvaStateVertex* top, FileLine* flp) {
+        return m_graph.addClockedEdge(fromp, top, throughoutCond(nullptr, flp));
     }
 
-    int addDelayChain(int startNode, int n, FileLine* flp) {
-        int current = startNode;
+    SvaStateVertex* addDelayChain(SvaStateVertex* startp, int n, FileLine* flp) {
+        SvaStateVertex* currentp = startp;
         for (int i = 0; i < n; ++i) {
-            const int next = scopedCreateNode();
-            guardedEdge(current, next, flp);
-            current = next;
+            SvaStateVertex* const nextp = scopedCreateVertex();
+            guardedEdge(currentp, nextp, flp);
+            currentp = nextp;
         }
-        return current;
+        return currentp;
     }
 
-    // Build NFA for an SExpr. finalCond = RHS (not yet added as a node).
+    // Build NFA for an SExpr. finalCond = RHS (not yet added as a vertex).
     // isTopLevelStep: marks outermost required boolean check as rejectOnFail.
-    BuildResult buildSExpr(AstSExpr* sexprp, int entryNode, bool isTopLevelStep = false) {
+    BuildResult buildSExpr(AstSExpr* sexprp, SvaStateVertex* entryVtxp, bool isTopLevelStep = false) {
         AstDelay* const delayp = VN_CAST(sexprp->delayp(), Delay);
         if (!delayp || !delayp->isCycleDelay()) return BuildResult::fail();
 
         FileLine* const flp = sexprp->fileline();
 
         // Handle LHS (preExpr)
-        int currentNode = entryNode;
+        SvaStateVertex* currentp = entryVtxp;
         if (AstNodeExpr* const preExprp = sexprp->preExprp()) {
-            const BuildResult pre = buildExpr(preExprp, currentNode, isTopLevelStep);
+            const BuildResult pre = buildExpr(preExprp, currentp, isTopLevelStep);
             if (!pre.valid()) return BuildResult::fail(pre.errorEmitted);
             if (pre.finalCondp) {
-                const int condNode = scopedCreateNode();
-                guardedLink(pre.termNode, condNode, sampled(pre.finalCondp->cloneTreePure(false)),
-                            flp);
-                if (isTopLevelStep && !m_nfa.nodes[pre.termNode].isUnbounded
+                SvaStateVertex* const condVtxp = scopedCreateVertex();
+                SvaTransEdge* const edgep = guardedLink(
+                    pre.termVertexp, condVtxp,
+                    sampled(pre.finalCondp->cloneTreePure(false)), flp);
+                if (isTopLevelStep && !pre.termVertexp->m_isUnbounded
                     && !m_inUnboundedScope) {
                     // Do not mark liveness sources: first boolean check is deferred.
-                    m_nfa.edges.back().rejectOnFail = true;
+                    edgep->m_rejectOnFail = true;
                 }
-                currentNode = condNode;
+                currentp = condVtxp;
             } else {
-                currentNode = pre.termNode;
+                currentp = pre.termVertexp;
             }
         }
 
         // Handle delay
-        std::vector<int> rangeMidSources;
+        std::vector<SvaStateVertex*> rangeMidSources;
         if (delayp->isRangeDelay()) {
             const int minDelay = getConstInt(delayp->lhsp());
             if (minDelay < 0) {
@@ -304,9 +354,9 @@ class SvaNfaBuilder final {
             if (delayp->isUnbounded()) {
                 // `##[M:$]`: wait M cycles, then self-loop waiting for the
                 // match condition. Unbounded = liveness, so no reject.
-                currentNode = addDelayChain(currentNode, minDelay, flp);
-                guardedEdge(currentNode, currentNode, flp);
-                m_nfa.nodes[currentNode].isUnbounded = true;
+                currentp = addDelayChain(currentp, minDelay, flp);
+                guardedEdge(currentp, currentp, flp);
+                currentp->m_isUnbounded = true;
                 m_inUnboundedScope = true;
             } else {
                 const int maxDelay = getConstInt(delayp->rhsp());
@@ -322,47 +372,45 @@ class SvaNfaBuilder final {
                     return BuildResult::failWithError();
                 }
                 if (minDelay == maxDelay) {
-                    currentNode = addDelayChain(currentNode, minDelay, flp);
+                    currentp = addDelayChain(currentp, minDelay, flp);
                 } else {
                     const int range = maxDelay - minDelay;
-                    currentNode = addDelayChain(currentNode, minDelay, flp);
+                    currentp = addDelayChain(currentp, minDelay, flp);
                     constexpr int kChainLimit = 256;
                     AstNodeExpr* const exprp = sexprp->exprp();
                     const bool nestedRhs = VN_IS(exprp, SExpr);
                     if (range > kChainLimit) {
                         // Large range: counter FSM. Overlapping triggers during an
                         // active count are dropped (non-overlapping semantics only).
-                        const int counterNodeId = scopedCreateNode();
-                        m_nfa.nodes[counterNodeId].isCounter = true;
-                        m_nfa.nodes[counterNodeId].counterMin = 0;
-                        m_nfa.nodes[counterNodeId].counterMax = range;
-                        guardedEdge(currentNode, counterNodeId, flp);
-                        currentNode = counterNodeId;
+                        SvaStateVertex* const counterVtxp = scopedCreateVertex();
+                        counterVtxp->m_isCounter = true;
+                        counterVtxp->m_counterMin = 0;
+                        counterVtxp->m_counterMax = range;
+                        guardedEdge(currentp, counterVtxp, flp);
+                        currentp = counterVtxp;
                     } else if (nestedRhs) {
                         // Merge all [M,N] positions; continuation is per-attempt.
-                        const int mergeNode = scopedCreateNode();
-                        guardedLink(currentNode, mergeNode, flp);
+                        SvaStateVertex* const mergeVtxp = scopedCreateVertex();
+                        guardedLink(currentp, mergeVtxp, flp);
                         for (int i = 0; i < range; ++i) {
-                            const int nextNode = scopedCreateNode();
-                            guardedEdge(currentNode, nextNode, flp);
-                            guardedLink(nextNode, mergeNode, flp);
-                            currentNode = nextNode;
+                            SvaStateVertex* const nextVtxp = scopedCreateVertex();
+                            guardedEdge(currentp, nextVtxp, flp);
+                            guardedLink(nextVtxp, mergeVtxp, flp);
+                            currentp = nextVtxp;
                         }
-                        currentNode = mergeNode;
+                        currentp = mergeVtxp;
                     } else {
-                        // Pure boolean RHS: register chain. Each mid-position links to accept
-                        // (accept-only); last position is the reject source. Edge gating
-                        // (!sampled(exprp)) prevents already-matched attempts from propagating
-                        // further, avoiding spurious reject at later positions.
-                        rangeMidSources.push_back(currentNode);
+                        // Pure boolean RHS: register chain. Each mid-position links
+                        // to match (match-only); last position is the reject source.
+                        rangeMidSources.push_back(currentp);
                         for (int i = 0; i < range; ++i) {
-                            const int nextNode = scopedCreateNode();
+                            SvaStateVertex* const nextVtxp = scopedCreateVertex();
                             AstNodeExpr* const notExprp
                                 = new AstNot{flp, sampled(exprp->cloneTreePure(false))};
                             notExprp->dtypeSetBit();
-                            guardedEdge(currentNode, nextNode, notExprp, flp);
-                            if (i < range - 1) { rangeMidSources.push_back(nextNode); }
-                            currentNode = nextNode;
+                            guardedEdge(currentp, nextVtxp, notExprp, flp);
+                            if (i < range - 1) rangeMidSources.push_back(nextVtxp);
+                            currentp = nextVtxp;
                         }
                     }
                 }
@@ -375,7 +423,7 @@ class SvaNfaBuilder final {
                                 " (IEEE 1800-2023 16.7)");
                 return BuildResult::failWithError();
             }
-            currentNode = addDelayChain(currentNode, delayCycles, flp);
+            currentp = addDelayChain(currentp, delayCycles, flp);
         }
 
         // Multi-cycle RHS: recurse (only plain boolean is returned as finalCondp).
@@ -383,12 +431,13 @@ class SvaNfaBuilder final {
         if (VN_IS(exprp, SExpr) || VN_IS(exprp, SAnd) || VN_IS(exprp, SOr)
             || VN_IS(exprp, SConsRep) || VN_IS(exprp, SGotoRep) || VN_IS(exprp, SThroughout)
             || VN_IS(exprp, SIntersect) || VN_IS(exprp, SNonConsRep)) {
-            return buildExpr(exprp, currentNode, isTopLevelStep);
+            return buildExpr(exprp, currentp, isTopLevelStep);
         }
-        return {currentNode, exprp, std::move(rangeMidSources)};
+        return {currentp, exprp, std::move(rangeMidSources)};
     }
 
-    BuildResult buildConsRep(AstSConsRep* repp, int entryNode, bool isTopLevelStep = false) {
+    BuildResult buildConsRep(AstSConsRep* repp, SvaStateVertex* entryVtxp,
+                             bool isTopLevelStep = false) {
         FileLine* const flp = repp->fileline();
         AstNodeExpr* const exprp = repp->exprp();
         // Multi-cycle expr in ConsRep not yet supported; bail to avoid invalid AST.
@@ -407,118 +456,121 @@ class SvaNfaBuilder final {
             return BuildResult::fail();
         }
 
-        int currentNode = entryNode;
+        SvaStateVertex* currentp = entryVtxp;
         for (int i = 0; i < minN; ++i) {
             if (i > 0) {
-                const int nextNode = scopedCreateNode();
-                guardedEdge(currentNode, nextNode, flp);
-                currentNode = nextNode;
+                SvaStateVertex* const nextp = scopedCreateVertex();
+                guardedEdge(currentp, nextp, flp);
+                currentp = nextp;
             }
             // Mark first and last boolean Links as rejectOnFail for correct
             // reject on standalone ConsRep.
-            const int condNode = scopedCreateNode();
-            guardedLink(currentNode, condNode, sampled(exprp->cloneTreePure(false)), flp);
+            SvaStateVertex* const condVtxp = scopedCreateVertex();
+            SvaTransEdge* const linkp
+                = guardedLink(currentp, condVtxp, sampled(exprp->cloneTreePure(false)), flp);
             if (isTopLevelStep && (i == 0 || i == minN - 1)) {
-                m_nfa.edges.back().rejectOnFail = true;
+                linkp->m_rejectOnFail = true;
             }
-            currentNode = condNode;
+            currentp = condVtxp;
         }
 
         if (repp->unbounded()) {
             if (minN == 0) {
-                const int waitNode = scopedCreateNode();
-                guardedEdge(currentNode, waitNode, flp);
-                const int checkNode = scopedCreateNode();
-                guardedLink(waitNode, checkNode, sampled(exprp->cloneTreePure(false)), flp);
-                guardedEdge(checkNode, waitNode, flp);
-                guardedLink(currentNode, checkNode, flp);
-                currentNode = checkNode;
+                SvaStateVertex* const waitVtxp = scopedCreateVertex();
+                guardedEdge(currentp, waitVtxp, flp);
+                SvaStateVertex* const checkVtxp = scopedCreateVertex();
+                guardedLink(waitVtxp, checkVtxp, sampled(exprp->cloneTreePure(false)), flp);
+                guardedEdge(checkVtxp, waitVtxp, flp);
+                guardedLink(currentp, checkVtxp, flp);
+                currentp = checkVtxp;
             } else {
-                const int loopBackNode = scopedCreateNode();
-                guardedEdge(currentNode, loopBackNode, flp);
-                const int reCheckNode = scopedCreateNode();
-                guardedLink(loopBackNode, reCheckNode, sampled(exprp->cloneTreePure(false)), flp);
-                guardedEdge(reCheckNode, loopBackNode, flp);
-                guardedLink(reCheckNode, currentNode, flp);
+                SvaStateVertex* const loopBackVtxp = scopedCreateVertex();
+                guardedEdge(currentp, loopBackVtxp, flp);
+                SvaStateVertex* const reCheckVtxp = scopedCreateVertex();
+                guardedLink(loopBackVtxp, reCheckVtxp,
+                            sampled(exprp->cloneTreePure(false)), flp);
+                guardedEdge(reCheckVtxp, loopBackVtxp, flp);
+                guardedLink(reCheckVtxp, currentp, flp);
             }
-            m_nfa.nodes[currentNode].isUnbounded = true;
+            currentp->m_isUnbounded = true;
             m_inUnboundedScope = true;
         } else if (repp->maxCountp()) {
             const int maxN = getConstInt(repp->maxCountp());
             if (maxN < minN) return BuildResult::fail();
-            const int mergeNode = scopedCreateNode();
-            guardedLink(currentNode, mergeNode, flp);
+            SvaStateVertex* const mergeVtxp = scopedCreateVertex();
+            guardedLink(currentp, mergeVtxp, flp);
             for (int i = minN; i < maxN; ++i) {
-                const int nextNode = scopedCreateNode();
-                guardedEdge(currentNode, nextNode, flp);
-                const int checkNode = scopedCreateNode();
-                guardedLink(nextNode, checkNode, sampled(exprp->cloneTreePure(false)), flp);
-                guardedLink(checkNode, mergeNode, flp);
-                currentNode = checkNode;
+                SvaStateVertex* const nextVtxp = scopedCreateVertex();
+                guardedEdge(currentp, nextVtxp, flp);
+                SvaStateVertex* const checkVtxp = scopedCreateVertex();
+                guardedLink(nextVtxp, checkVtxp, sampled(exprp->cloneTreePure(false)), flp);
+                guardedLink(checkVtxp, mergeVtxp, flp);
+                currentp = checkVtxp;
             }
-            currentNode = mergeNode;
+            currentp = mergeVtxp;
         }
         // finalCond = nullptr (already checked via Links)
-        return {currentNode, nullptr, {}};
+        return {currentp, nullptr, {}};
     }
 
-    BuildResult buildGotoRep(AstSGotoRep* repp, int entryNode) {
+    BuildResult buildGotoRep(AstSGotoRep* repp, SvaStateVertex* entryVtxp) {
         FileLine* const flp = repp->fileline();
         AstNodeExpr* const exprp = repp->exprp();
         const int n = getConstInt(repp->countp());
         if (n <= 0) return BuildResult::fail();
 
-        int currentNode = entryNode;
+        SvaStateVertex* currentp = entryVtxp;
         for (int i = 0; i < n; ++i) {
-            const int waitNode = scopedCreateNode();
+            SvaStateVertex* const waitVtxp = scopedCreateVertex();
             // Edge (not Link) for all iterations: IEEE expansion ##1 before each
             // match. A Link at i==0 was wrong -- it allowed same-cycle matching
             // and was discarded by Phase 2 (waitNode has a self-loop Edge).
-            guardedEdge(currentNode, waitNode, flp);
+            guardedEdge(currentp, waitVtxp, flp);
             AstNodeExpr* const notExprp = new AstNot{flp, exprp->cloneTreePure(false)};
             notExprp->dtypeSetBit();
-            guardedEdge(waitNode, waitNode, sampled(notExprp), flp);
-            const int matchNode = scopedCreateNode();
-            guardedLink(waitNode, matchNode, sampled(exprp->cloneTreePure(false)), flp);
-            currentNode = matchNode;
+            guardedEdge(waitVtxp, waitVtxp, sampled(notExprp), flp);
+            SvaStateVertex* const matchVtxp = scopedCreateVertex();
+            guardedLink(waitVtxp, matchVtxp, sampled(exprp->cloneTreePure(false)), flp);
+            currentp = matchVtxp;
         }
-        m_nfa.nodes[currentNode].isUnbounded = true;  // [->N] waits unboundedly
+        currentp->m_isUnbounded = true;  // [->N] waits unboundedly
         m_inUnboundedScope = true;
-        return {currentNode, nullptr, {}};
+        return {currentp, nullptr, {}};
     }
 
-    // Build merge node for SOr / LogOr: both branches feed into one node.
-    BuildResult buildOrMerge(AstNodeExpr* lhsp, AstNodeExpr* rhsp, int entryNode, FileLine* flp) {
-        const BuildResult lhs = buildExpr(lhsp, entryNode);
-        const BuildResult rhs = buildExpr(rhsp, entryNode);
+    // Build merge vertex for SOr / LogOr: both branches feed into one vertex.
+    BuildResult buildOrMerge(AstNodeExpr* lhsp, AstNodeExpr* rhsp, SvaStateVertex* entryVtxp,
+                             FileLine* flp) {
+        const BuildResult lhs = buildExpr(lhsp, entryVtxp);
+        const BuildResult rhs = buildExpr(rhsp, entryVtxp);
         if (!lhs.valid() || !rhs.valid()) {
             return BuildResult::fail(lhs.errorEmitted || rhs.errorEmitted);
         }
-        const int mergeNode = scopedCreateNode();
+        SvaStateVertex* const mergeVtxp = scopedCreateVertex();
         if (lhs.finalCondp) {
-            guardedLink(lhs.termNode, mergeNode, sampled(lhs.finalCondp->cloneTreePure(false)),
-                        flp);
+            guardedLink(lhs.termVertexp, mergeVtxp,
+                        sampled(lhs.finalCondp->cloneTreePure(false)), flp);
         } else {
-            guardedLink(lhs.termNode, mergeNode, flp);
+            guardedLink(lhs.termVertexp, mergeVtxp, flp);
         }
         if (rhs.finalCondp) {
-            guardedLink(rhs.termNode, mergeNode, sampled(rhs.finalCondp->cloneTreePure(false)),
-                        flp);
+            guardedLink(rhs.termVertexp, mergeVtxp,
+                        sampled(rhs.finalCondp->cloneTreePure(false)), flp);
         } else {
-            guardedLink(rhs.termNode, mergeNode, flp);
+            guardedLink(rhs.termVertexp, mergeVtxp, flp);
         }
-        return {mergeNode, nullptr, {}};
+        return {mergeVtxp, nullptr, {}};
     }
 
     // Build done-latch combiner for SAnd/SIntersect (IEEE 1800-2023 16.9.5).
-    BuildResult buildAndCombiner(AstNodeExpr* lhsExprp, AstNodeExpr* rhsExprp, int entryNode,
-                                 FileLine* flp) {
+    BuildResult buildAndCombiner(AstNodeExpr* lhsExprp, AstNodeExpr* rhsExprp,
+                                 SvaStateVertex* entryVtxp, FileLine* flp) {
         // Snapshot-restore scope so LHS liveness does not leak into RHS.
         const bool savedScope = m_inUnboundedScope;
-        const BuildResult lhs = buildExpr(lhsExprp, entryNode);
+        const BuildResult lhs = buildExpr(lhsExprp, entryVtxp);
         const bool lhsScope = m_inUnboundedScope;
         m_inUnboundedScope = savedScope;
-        const BuildResult rhs = buildExpr(rhsExprp, entryNode);
+        const BuildResult rhs = buildExpr(rhsExprp, entryVtxp);
         const bool rhsScope = m_inUnboundedScope;
         m_inUnboundedScope = savedScope || lhsScope || rhsScope;
         if (!lhs.valid() || !rhs.valid()) {
@@ -526,7 +578,7 @@ class SvaNfaBuilder final {
         }
 
         // Single-cycle operands: use boolean AND (done-latch would fire across cycles).
-        if (lhs.termNode == entryNode && rhs.termNode == entryNode) {
+        if (lhs.termVertexp == entryVtxp && rhs.termVertexp == entryVtxp) {
             AstNodeExpr* condp = nullptr;
             if (lhs.finalCondp && rhs.finalCondp) {
                 condp = new AstAnd{flp, lhs.finalCondp->cloneTreePure(false),
@@ -537,66 +589,67 @@ class SvaNfaBuilder final {
             } else {
                 condp = rhs.finalCondp;
             }
-            return {entryNode, condp, {}};
+            return {entryVtxp, condp, {}};
         }
         // Range-delay mid-window sources in either sub-branch would need
-        // to be folded into the latch's "accept-now" signal, which the
+        // to be folded into the latch's match-now signal, which the
         // current combiner does not support. Defer (UNSUPPORTED).
-        if (!lhs.midSources.empty() || !rhs.midSources.empty()) { return BuildResult::fail(); }
-        const int combNode = scopedCreateNode();
-        SvaNfaNode& cn = m_nfa.nodes[combNode];
-        cn.isAndCombiner = true;
-        cn.andLhsTermId = lhs.termNode;
-        cn.andRhsTermId = rhs.termNode;
-        if (lhs.finalCondp) { cn.andLhsCondp = lhs.finalCondp->cloneTreePure(false); }
-        if (rhs.finalCondp) { cn.andRhsCondp = rhs.finalCondp->cloneTreePure(false); }
-        if (m_nfa.nodes[lhs.termNode].isUnbounded || m_nfa.nodes[rhs.termNode].isUnbounded) {
-            cn.isUnbounded = true;
+        if (!lhs.midSources.empty() || !rhs.midSources.empty()) return BuildResult::fail();
+        SvaStateVertex* const combVtxp = scopedCreateVertex();
+        combVtxp->m_isAndCombiner = true;
+        combVtxp->m_andLhsTermp = lhs.termVertexp;
+        combVtxp->m_andRhsTermp = rhs.termVertexp;
+        if (lhs.finalCondp) combVtxp->m_andLhsCondp = lhs.finalCondp->cloneTreePure(false);
+        if (rhs.finalCondp) combVtxp->m_andRhsCondp = rhs.finalCondp->cloneTreePure(false);
+        if (lhs.termVertexp->m_isUnbounded || rhs.termVertexp->m_isUnbounded) {
+            combVtxp->m_isUnbounded = true;
         }
         // Wire terminal-boolean rejects to a dedicated sink so each side can fail
         // the AND independently. Skip for liveness or single-cycle operands
-        // (single-cycle termNode == entryNode would fire every cycle).
-        if (!cn.isUnbounded) {
+        // (single-cycle termVertexp == entryVtxp would fire every cycle).
+        if (!combVtxp->m_isUnbounded) {
             bool needSink = false;
-            const bool lhsMultiCycle = (lhs.termNode != entryNode);
-            const bool rhsMultiCycle = (rhs.termNode != entryNode);
-            if (lhs.finalCondp && lhsMultiCycle && !m_nfa.nodes[lhs.termNode].isUnbounded) {
+            const bool lhsMultiCycle = (lhs.termVertexp != entryVtxp);
+            const bool rhsMultiCycle = (rhs.termVertexp != entryVtxp);
+            if (lhs.finalCondp && lhsMultiCycle && !lhs.termVertexp->m_isUnbounded) {
                 needSink = true;
             }
-            if (rhs.finalCondp && rhsMultiCycle && !m_nfa.nodes[rhs.termNode].isUnbounded) {
+            if (rhs.finalCondp && rhsMultiCycle && !rhs.termVertexp->m_isUnbounded) {
                 needSink = true;
             }
             if (needSink) {
-                const int sinkNode = m_nfa.createNode();
-                m_nfa.nodes[sinkNode].isRejectSink = true;
-                if (lhs.finalCondp && lhsMultiCycle && !m_nfa.nodes[lhs.termNode].isUnbounded) {
-                    m_nfa.addLink(lhs.termNode, sinkNode,
-                                  sampled(lhs.finalCondp->cloneTreePure(false)));
-                    m_nfa.edges.back().rejectOnFail = true;
+                SvaStateVertex* const sinkVtxp = m_graph.createStateVertex();
+                sinkVtxp->m_isRejectSink = true;
+                if (lhs.finalCondp && lhsMultiCycle && !lhs.termVertexp->m_isUnbounded) {
+                    SvaTransEdge* const ep = m_graph.addLink(
+                        lhs.termVertexp, sinkVtxp,
+                        sampled(lhs.finalCondp->cloneTreePure(false)));
+                    ep->m_rejectOnFail = true;
                 }
-                if (rhs.finalCondp && rhsMultiCycle && !m_nfa.nodes[rhs.termNode].isUnbounded) {
-                    m_nfa.addLink(rhs.termNode, sinkNode,
-                                  sampled(rhs.finalCondp->cloneTreePure(false)));
-                    m_nfa.edges.back().rejectOnFail = true;
+                if (rhs.finalCondp && rhsMultiCycle && !rhs.termVertexp->m_isUnbounded) {
+                    SvaTransEdge* const ep = m_graph.addLink(
+                        rhs.termVertexp, sinkVtxp,
+                        sampled(rhs.finalCondp->cloneTreePure(false)));
+                    ep->m_rejectOnFail = true;
                 }
             }
         }
-        return {combNode, nullptr, {}};
+        return {combVtxp, nullptr, {}};
     }
 
-    BuildResult buildThroughout(AstSThroughout* nodep, int entryNode,
+    BuildResult buildThroughout(AstSThroughout* nodep, SvaStateVertex* entryVtxp,
                                 bool isTopLevelStep = false) {
-        // Mark entryNode so "cond false at tick 0" is detected as throughout-drop.
-        m_nfa.nodes[entryNode].throughoutConds.push_back(nodep->lhsp()->cloneTreePure(false));
+        // Mark entryVtxp so "cond false at tick 0" is detected as throughout-drop.
+        entryVtxp->m_throughoutConds.push_back(nodep->lhsp()->cloneTreePure(false));
         m_throughoutStack.push_back(nodep->lhsp());
-        const BuildResult result = buildExpr(nodep->rhsp(), entryNode, isTopLevelStep);
+        const BuildResult result = buildExpr(nodep->rhsp(), entryVtxp, isTopLevelStep);
         m_throughoutStack.pop_back();
         return result;
     }
 
 public:
-    explicit SvaNfaBuilder(SvaNfa& nfa)
-        : m_nfa{nfa} {}
+    explicit SvaNfaBuilder(SvaGraph& graph)
+        : m_graph{graph} {}
 
     // Reset scope between antecedent and consequent: liveness must not leak.
     void resetScope() {
@@ -604,27 +657,28 @@ public:
         m_throughoutStack.clear();
     }
 
-    BuildResult buildExpr(AstNodeExpr* nodep, int entryNode, bool isTopLevelStep = false) {
+    BuildResult buildExpr(AstNodeExpr* nodep, SvaStateVertex* entryVtxp,
+                          bool isTopLevelStep = false) {
         if (AstSExpr* const sexprp = VN_CAST(nodep, SExpr)) {
-            return buildSExpr(sexprp, entryNode, isTopLevelStep);
+            return buildSExpr(sexprp, entryVtxp, isTopLevelStep);
         }
         if (AstSConsRep* const repp = VN_CAST(nodep, SConsRep)) {
-            return buildConsRep(repp, entryNode, isTopLevelStep);
+            return buildConsRep(repp, entryVtxp, isTopLevelStep);
         }
         if (AstSGotoRep* const repp = VN_CAST(nodep, SGotoRep)) {
-            return buildGotoRep(repp, entryNode);
+            return buildGotoRep(repp, entryVtxp);
         }
         if (AstSThroughout* const throughoutp = VN_CAST(nodep, SThroughout)) {
-            return buildThroughout(throughoutp, entryNode, isTopLevelStep);
+            return buildThroughout(throughoutp, entryVtxp, isTopLevelStep);
         }
         if (AstSOr* const orp = VN_CAST(nodep, SOr)) {
-            return buildOrMerge(orp->lhsp(), orp->rhsp(), entryNode, orp->fileline());
+            return buildOrMerge(orp->lhsp(), orp->rhsp(), entryVtxp, orp->fileline());
         }
         if (AstLogOr* const orp = VN_CAST(nodep, LogOr)) {
-            return buildOrMerge(orp->lhsp(), orp->rhsp(), entryNode, orp->fileline());
+            return buildOrMerge(orp->lhsp(), orp->rhsp(), entryVtxp, orp->fileline());
         }
         if (AstSAnd* const andp = VN_CAST(nodep, SAnd)) {
-            return buildAndCombiner(andp->lhsp(), andp->rhsp(), entryNode, andp->fileline());
+            return buildAndCombiner(andp->lhsp(), andp->rhsp(), entryVtxp, andp->fileline());
         }
         if (AstSIntersect* const intp = VN_CAST(nodep, SIntersect)) {
             // IEEE 1800-2023 16.9.6: SAnd with equal-length constraint.
@@ -638,61 +692,84 @@ public:
                               + " cycles (IEEE 1800-2023 16.9.6)");
                 return BuildResult::failWithError();
             }
-            return buildAndCombiner(intp->lhsp(), intp->rhsp(), entryNode, intp->fileline());
+            return buildAndCombiner(intp->lhsp(), intp->rhsp(), entryVtxp, intp->fileline());
         }
-        if (VN_IS(nodep, SNonConsRep)) { return BuildResult::fail(); }
+        if (VN_IS(nodep, SNonConsRep)) return BuildResult::fail();
         // Boolean leaf (including LogAnd): return as finalCond
-        return {entryNode, nodep, {}};
+        return {entryVtxp, nodep, {}};
     }
 
     BuildResult build(AstNodeExpr* exprp) {
-        m_nfa.startNode = scopedCreateNode();
-        return buildExpr(exprp, m_nfa.startNode, /*isTopLevelStep=*/true);
+        m_graph.m_startVertexp = scopedCreateVertex();
+        return buildExpr(exprp, m_graph.m_startVertexp, /*isTopLevelStep=*/true);
     }
 };
 
 //######################################################################
-// NFA Emitter
+// NFA Lowering (converts NFA graph to synthesizable AstAlways blocks)
 
-class SvaNfaEmitter final {
-    AstNodeModule* const m_modp;
+class SvaNfaLowering final {
+    AstNodeModule* const m_modp;  // Module to add state vars and always blocks to
     V3UniqueNames m_names{"__Vnfa"};
 
+    // Build a match-now expression: stateSig[i] && $sampled(condp)
+    static AstNodeExpr* buildMatchNow(FileLine* flp, AstNodeExpr* stateExprp,
+                                      AstNodeExpr* condp) {
+        AstNodeExpr* const statep = stateExprp->cloneTreePure(false);
+        if (!condp) return statep;
+        AstSampled* const sampp = new AstSampled{flp, condp->cloneTreePure(false)};
+        sampp->dtypeFrom(condp);
+        return new AstAnd{flp, statep, sampp};
+    }
     static AstNodeExpr* andCond(FileLine* flp, AstNodeExpr* exprp, AstNodeExpr* condp) {
         if (!condp) return exprp;
-        AstNodeExpr* const resultp = new AstAnd{flp, exprp, condp->cloneTreePure(false)};
-        resultp->dtypeSetBit();
-        return resultp;
+        return new AstAnd{flp, exprp, condp->cloneTreePure(false)};
     }
     static AstNodeExpr* orExprs(FileLine* flp, AstNodeExpr* ap, AstNodeExpr* bp) {
         if (!ap) return bp;
         if (!bp) return ap;
-        AstNodeExpr* const resultp = new AstOr{flp, ap, bp};
-        resultp->dtypeSetBit();
-        return resultp;
+        return new AstOr{flp, ap, bp};
     }
 
 public:
-    explicit SvaNfaEmitter(AstNodeModule* modp)
+    explicit SvaNfaLowering(AstNodeModule* modp)
         : m_modp{modp} {}
 
-    // Emit NFA hardware. Links are combinational; Edges are registered.
-    // Returns !reject for assert/assume, or accept for cover.
-    AstNodeExpr* emit(FileLine* flp, const SvaNfa& nfa, AstNodeExpr* triggerExprp,
-                      AstSenTree* senTreep, AstNodeExpr* acceptCondp, bool isCover,
-                      AstNodeExpr* disableExprp = nullptr, bool negated = false,
-                      AstNodeExpr** outAcceptpp = nullptr, AstVar* disableCntVarp = nullptr,
-                      AstVar* snapshotVarp = nullptr,
-                      std::vector<AstNodeExpr*>* outRequiredStepSrcsp = nullptr) {
+    // Lower NFA graph to synthesizable AstAlways blocks with state registers.
+    // Links are combinational; Edges are registered (NBA).
+    // Returns !reject for assert/assume, or match for cover.
+    AstNodeExpr* lower(FileLine* flp, SvaGraph& graph, AstNodeExpr* triggerExprp,
+                       AstSenTree* senTreep, AstNodeExpr* matchCondp, bool isCover,
+                       AstNodeExpr* disableExprp = nullptr, bool negated = false,
+                       AstNodeExpr** outMatchpp = nullptr, AstVar* disableCntVarp = nullptr,
+                       AstVar* snapshotVarp = nullptr,
+                       std::vector<AstNodeExpr*>* outRequiredStepSrcsp = nullptr) {
         const std::string baseName = m_names.get("");
-        const int N = static_cast<int>(nfa.nodes.size());
 
-        // Identify registered nodes (targets of Edges)
+        // Number vertices with sequential colors for array indexing.
+        int N = 0;
+        for (V3GraphVertex& vtxr : graph.m_graph.vertices()) {
+            vtxr.color(N++);
+        }
+        // Build vertex lookup array (color → vertex pointer).
+        std::vector<SvaStateVertex*> vtx(N, nullptr);
+        for (V3GraphVertex& vtxr : graph.m_graph.vertices()) {
+            vtx[vtxr.color()] = static_cast<SvaStateVertex*>(&vtxr);
+        }
+        const int startIdx = graph.m_startVertexp->color();
+        const int matchIdx = graph.m_matchVertexp ? graph.m_matchVertexp->color() : -1;
+        const std::vector<const SvaTransEdge*> edges = graph.allEdges();
+
+        // Identify registered vertices (targets of clocked edges)
         std::vector<bool> needsReg(N, false);
-        for (const auto& edge : nfa.edges) {
-            if (edge.consumesCycle && edge.toId != nfa.acceptNode
-                && !nfa.nodes[edge.toId].isRejectSink) {
-                needsReg[edge.toId] = true;
+        for (int i = 0; i < N; ++i) {
+            for (const V3GraphEdge& er : vtx[i]->outEdges()) {
+                const SvaTransEdge& te = static_cast<const SvaTransEdge&>(er);
+                const int toIdx = te.toVtxp()->color();
+                if (te.m_consumesCycle && toIdx != matchIdx
+                    && !te.toVtxp()->m_isRejectSink) {
+                    needsReg[toIdx] = true;
+                }
             }
         }
 
@@ -703,7 +780,7 @@ public:
         std::vector<AstVar*> doneRVars(N, nullptr);
         AstNodeDType* const u32DTypep = m_modp->findBasicDType(VBasicDTypeKwd::UINT32);
         for (int i = 0; i < N; ++i) {
-            if (nfa.nodes[i].isAndCombiner) {
+            if (vtx[i]->m_isAndCombiner) {
                 const std::string base = baseName + "__a" + std::to_string(i);
                 AstVar* const lp = new AstVar{flp, VVarType::MODULETEMP, base + "_doneL",
                                               m_modp->findBitDType()};
@@ -717,7 +794,7 @@ public:
                 doneRVars[i] = rp;
                 continue;
             }
-            if (nfa.nodes[i].isCounter) {
+            if (vtx[i]->m_isCounter) {
                 const std::string base = baseName + "__c" + std::to_string(i);
                 AstVar* const activep = new AstVar{flp, VVarType::MODULETEMP, base + "_active",
                                                    m_modp->findBitDType()};
@@ -732,7 +809,7 @@ public:
                 continue;
             }
             if (!needsReg[i]) continue;
-            if (i == nfa.startNode || nfa.nodes[i].isAccept) continue;
+            if (i == startIdx || vtx[i]->m_isMatch) continue;
             const std::string varName = baseName + "__s" + std::to_string(i);
             AstVar* const varp
                 = new AstVar{flp, VVarType::MODULETEMP, varName, m_modp->findBitDType()};
@@ -743,20 +820,20 @@ public:
 
         // Phase 1: Resolve Links (combinational state_sig)
         std::vector<AstNodeExpr*> stateSig(N, nullptr);
-        stateSig[nfa.startNode] = triggerExprp->cloneTreePure(false);
+        stateSig[startIdx] = triggerExprp->cloneTreePure(false);
         for (int i = 0; i < N; ++i) {
             if (stateVars[i]) {
                 stateSig[i] = new AstVarRef{flp, stateVars[i], VAccess::READ};
             } else if (counterActiveVars[i]) {
                 AstVarRef* const activeRefp
                     = new AstVarRef{flp, counterActiveVars[i], VAccess::READ};
-                if (nfa.nodes[i].counterMin == 0) {
+                if (vtx[i]->m_counterMin == 0) {
                     stateSig[i] = activeRefp;
                 } else {
                     AstGte* const gtep
                         = new AstGte{flp, new AstVarRef{flp, counterCountVars[i], VAccess::READ},
                                      new AstConst{flp, AstConst::WidthedValue{}, 32,
-                                                  static_cast<uint32_t>(nfa.nodes[i].counterMin)}};
+                                                  static_cast<uint32_t>(vtx[i]->m_counterMin)}};
                     gtep->dtypeSetBit();
                     AstNodeExpr* const andp = new AstAnd{flp, activeRefp, gtep};
                     andp->dtypeSetBit();
@@ -765,66 +842,67 @@ public:
             }
         }
 
-        auto buildAcceptNow = [flp](AstNodeExpr* stateExprp, AstNodeExpr* condp) -> AstNodeExpr* {
-            AstNodeExpr* const statep = stateExprp->cloneTreePure(false);
-            if (!condp) return statep;
-            AstSampled* const sampp = new AstSampled{flp, condp->cloneTreePure(false)};
-            sampp->dtypeSetBit();
-            AstNodeExpr* const andp = new AstAnd{flp, statep, sampp};
-            andp->dtypeSetBit();
-            return andp;
-        };
-
+        // Fixed-point propagation along zero-delay (Link) edges.
+        // Worst case: longest chain of Link edges is N hops; SAnd combiner
+        // seeding adds one extra round; factor-of-2 covers reverse-order
+        // dependencies.  Static NFA size is bounded by kChainLimit (256)
+        // plus small per-operator overhead, so this is O(N^2) at compile
+        // time only -- not simulation time.
         for (int pass = 0; pass < 2 * N + 2; ++pass) {
             bool changed = false;
             // Seed SAnd combiners inside the fixed-point (sub-NFA termNodes
             // may be Link-propagated and only available after a pass).
             for (int i = 0; i < N; ++i) {
-                const auto& node = nfa.nodes[i];
-                if (!node.isAndCombiner) continue;
+                if (!vtx[i]->m_isAndCombiner) continue;
                 if (stateSig[i]) continue;
-                const int l = node.andLhsTermId;
-                const int r = node.andRhsTermId;
+                const int l = vtx[i]->m_andLhsTermp ? vtx[i]->m_andLhsTermp->color() : -1;
+                const int r = vtx[i]->m_andRhsTermp ? vtx[i]->m_andRhsTermp->color() : -1;
                 if (l < 0 || r < 0) continue;
                 if (!stateSig[l] || !stateSig[r]) continue;
 
-                AstNodeExpr* const acceptLNowp = buildAcceptNow(stateSig[l], node.andLhsCondp);
-                AstNodeExpr* const acceptRNowp = buildAcceptNow(stateSig[r], node.andRhsCondp);
+                AstNodeExpr* const matchLNowp
+                    = buildMatchNow(flp, stateSig[l], vtx[i]->m_andLhsCondp);
+                AstNodeExpr* const matchRNowp
+                    = buildMatchNow(flp, stateSig[r], vtx[i]->m_andRhsCondp);
 
                 AstNodeExpr* const doneLRefp = new AstVarRef{flp, doneLVars[i], VAccess::READ};
-                AstNodeExpr* const doneLOrp = new AstOr{flp, doneLRefp, acceptLNowp};
+                AstNodeExpr* const doneLOrp = new AstOr{flp, doneLRefp, matchLNowp};
                 doneLOrp->dtypeSetBit();
                 AstNodeExpr* const doneRRefp = new AstVarRef{flp, doneRVars[i], VAccess::READ};
-                AstNodeExpr* const doneROrp = new AstOr{flp, doneRRefp, acceptRNowp};
+                AstNodeExpr* const doneROrp = new AstOr{flp, doneRRefp, matchRNowp};
                 doneROrp->dtypeSetBit();
                 AstNodeExpr* const bothDonep = new AstAnd{flp, doneLOrp, doneROrp};
                 bothDonep->dtypeSetBit();
-                AstNodeExpr* const oneNowp = new AstOr{flp, acceptLNowp->cloneTreePure(false),
-                                                       acceptRNowp->cloneTreePure(false)};
+                AstNodeExpr* const oneNowp = new AstOr{flp, matchLNowp->cloneTreePure(false),
+                                                       matchRNowp->cloneTreePure(false)};
                 oneNowp->dtypeSetBit();
-                AstNodeExpr* const acceptp = new AstAnd{flp, bothDonep, oneNowp};
-                acceptp->dtypeSetBit();
-                stateSig[i] = acceptp;
+                AstNodeExpr* const matchedp = new AstAnd{flp, bothDonep, oneNowp};
+                matchedp->dtypeSetBit();
+                stateSig[i] = matchedp;
                 changed = true;
             }
 
-            for (const auto& edge : nfa.edges) {
-                if (edge.consumesCycle) continue;
-                if (!stateSig[edge.fromId]) continue;
-                if (nfa.nodes[edge.toId].isAccept) continue;
-                if (nfa.nodes[edge.toId].isRejectSink) continue;
+            for (int fi = 0; fi < N; ++fi) {
+                if (!stateSig[fi]) continue;
+                for (const V3GraphEdge& er : vtx[fi]->outEdges()) {
+                    const SvaTransEdge& te = static_cast<const SvaTransEdge&>(er);
+                    if (te.m_consumesCycle) continue;
+                    const int ti = te.toVtxp()->color();
+                    if (te.toVtxp()->m_isMatch) continue;
+                    if (te.toVtxp()->m_isRejectSink) continue;
 
-                AstNodeExpr* const srcSigp = stateSig[edge.fromId]->cloneTreePure(false);
-                AstNodeExpr* const contributionp = andCond(flp, srcSigp, edge.condp);
+                    AstNodeExpr* const srcSigp = stateSig[fi]->cloneTreePure(false);
+                    AstNodeExpr* const contributionp = andCond(flp, srcSigp, te.m_condp);
 
-                if (!stateSig[edge.toId]) {
-                    stateSig[edge.toId] = contributionp;
-                    changed = true;
-                } else if (!needsReg[edge.toId]) {
-                    stateSig[edge.toId] = orExprs(flp, stateSig[edge.toId], contributionp);
-                    changed = true;
-                } else {
-                    contributionp->deleteTree();
+                    if (!stateSig[ti]) {
+                        stateSig[ti] = contributionp;
+                        changed = true;
+                    } else if (!needsReg[ti]) {
+                        stateSig[ti] = orExprs(flp, stateSig[ti], contributionp);
+                        changed = true;
+                    } else {
+                        contributionp->deleteTree();
+                    }
                 }
             }
             if (!changed) break;
@@ -836,13 +914,14 @@ public:
             if (!stateVars[i]) continue;
 
             AstNodeExpr* nextStatep = nullptr;
-            for (const auto& edge : nfa.edges) {
-                if (edge.toId != i) continue;
-                if (!edge.consumesCycle) continue;
-                if (!stateSig[edge.fromId]) continue;
+            for (const V3GraphEdge& er : vtx[i]->inEdges()) {
+                const SvaTransEdge& te = static_cast<const SvaTransEdge&>(er);
+                if (!te.m_consumesCycle) continue;
+                const int fromIdx = te.fromVtxp()->color();
+                if (!stateSig[fromIdx]) continue;
 
-                AstNodeExpr* srcSigp = stateSig[edge.fromId]->cloneTreePure(false);
-                srcSigp = andCond(flp, srcSigp, edge.condp);
+                AstNodeExpr* srcSigp = stateSig[fromIdx]->cloneTreePure(false);
+                srcSigp = andCond(flp, srcSigp, te.m_condp);
 
                 if (disableExprp && !snapshotVarp) {
                     AstNodeExpr* const notDisp
@@ -885,15 +964,16 @@ public:
             if (!counterActiveVars[ci]) continue;
             AstVar* const activep = counterActiveVars[ci];
             AstVar* const cntp = counterCountVars[ci];
-            const uint32_t counterMax = static_cast<uint32_t>(nfa.nodes[ci].counterMax);
+            const uint32_t counterMax = static_cast<uint32_t>(vtx[ci]->m_counterMax);
 
             AstNodeExpr* incomingp = nullptr;
-            for (const auto& edge : nfa.edges) {
-                if (edge.toId != ci) continue;
-                if (!edge.consumesCycle) continue;
-                if (!stateSig[edge.fromId]) continue;
-                AstNodeExpr* contribp = stateSig[edge.fromId]->cloneTreePure(false);
-                contribp = andCond(flp, contribp, edge.condp);
+            for (const SvaTransEdge* const tep : edges) {
+                if (tep->toVtxp()->color() != ci) continue;
+                if (!tep->m_consumesCycle) continue;
+                const int fi = tep->fromVtxp()->color();
+                if (!stateSig[fi]) continue;
+                AstNodeExpr* contribp = stateSig[fi]->cloneTreePure(false);
+                contribp = andCond(flp, contribp, tep->m_condp);
                 if (disableExprp) {
                     AstNodeExpr* const notDisp
                         = new AstNot{flp, disableExprp->cloneTreePure(false)};
@@ -906,18 +986,18 @@ public:
             if (!incomingp) incomingp = new AstConst{flp, AstConst::BitFalse{}};
 
             AstNodeExpr* inWindowp = nullptr;
-            if (nfa.nodes[ci].counterMin == 0) {
+            if (vtx[ci]->m_counterMin == 0) {
                 inWindowp = new AstConst{flp, AstConst::BitTrue{}};
             } else {
                 inWindowp
                     = new AstGte{flp, new AstVarRef{flp, cntp, VAccess::READ},
                                  new AstConst{flp, AstConst::WidthedValue{}, 32,
-                                              static_cast<uint32_t>(nfa.nodes[ci].counterMin)}};
+                                              static_cast<uint32_t>(vtx[ci]->m_counterMin)}};
                 inWindowp->dtypeSetBit();
             }
             AstNodeExpr* acceptedNowp = nullptr;
-            if (acceptCondp) {
-                AstSampled* const sampp = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
+            if (matchCondp) {
+                AstSampled* const sampp = new AstSampled{flp, matchCondp->cloneTreePure(false)};
                 sampp->dtypeSetBit();
                 acceptedNowp = new AstAnd{flp, inWindowp, sampp};
                 acceptedNowp->dtypeSetBit();
@@ -964,9 +1044,10 @@ public:
         // NBA semantics ensure doneL/doneR read pre-update values (IEEE 16.9.5).
         for (int ai = 0; ai < N; ++ai) {
             if (!doneLVars[ai]) continue;
-            const auto& node = nfa.nodes[ai];
-            const int l = node.andLhsTermId;
-            const int r = node.andRhsTermId;
+            const SvaStateVertex* const avp = vtx[ai];
+            const int l = avp->m_andLhsTermp ? avp->m_andLhsTermp->color() : -1;
+            const int r = avp->m_andRhsTermp ? avp->m_andRhsTermp->color() : -1;
+            if (l < 0 || r < 0) continue;
             if (!stateSig[l] || !stateSig[r] || !stateSig[ai]) continue;
 
             AstAssignDly* const clearLp
@@ -977,10 +1058,12 @@ public:
                                    new AstConst{flp, AstConst::BitFalse{}}};
             clearLp->addNext(clearRp);
 
-            AstNodeExpr* const acceptLNowp = buildAcceptNow(stateSig[l], node.andLhsCondp);
-            AstNodeExpr* const acceptRNowp = buildAcceptNow(stateSig[r], node.andRhsCondp);
-            AstNodeExpr* gateLp = acceptLNowp;
-            AstNodeExpr* gateRp = acceptRNowp;
+            AstNodeExpr* const matchLNowp
+                = buildMatchNow(flp, stateSig[l], avp->m_andLhsCondp);
+            AstNodeExpr* const matchRNowp
+                = buildMatchNow(flp, stateSig[r], avp->m_andRhsCondp);
+            AstNodeExpr* gateLp = matchLNowp;
+            AstNodeExpr* gateRp = matchRNowp;
             if (disableExprp) {
                 AstNodeExpr* const notDisLp = new AstNot{flp, disableExprp->cloneTreePure(false)};
                 notDisLp->dtypeSetBit();
@@ -1019,32 +1102,33 @@ public:
 
         AstNodeExpr* terminalActivep = nullptr;
         AstNodeExpr* rejectBasep = nullptr;
-        for (const auto& edge : nfa.edges) {
-            if (edge.toId != nfa.acceptNode) continue;
-            if (edge.consumesCycle) continue;
-            if (!stateSig[edge.fromId]) continue;
+        for (const SvaTransEdge* const tep : edges) {
+            if (tep->toVtxp() != graph.m_matchVertexp) continue;
+            if (tep->m_consumesCycle) continue;
+            const int fi = tep->fromVtxp()->color();
+            if (!stateSig[fi]) continue;
 
-            AstNodeExpr* srcSigp = stateSig[edge.fromId]->cloneTreePure(false);
-            srcSigp = andCond(flp, srcSigp, edge.condp);
+            AstNodeExpr* srcSigp = stateSig[fi]->cloneTreePure(false);
+            srcSigp = andCond(flp, srcSigp, tep->m_condp);
             if (snapshotOkp) {
                 srcSigp = new AstAnd{flp, srcSigp, snapshotOkp->cloneTreePure(false)};
                 srcSigp->dtypeSetBit();
             }
 
-            if (nfa.nodes[edge.fromId].isCounter) {
-                const int ci = edge.fromId;
+            if (tep->fromVtxp()->m_isCounter) {
                 terminalActivep = orExprs(flp, terminalActivep, srcSigp->cloneTreePure(false));
                 AstNodeExpr* const atEndp
-                    = new AstEq{flp, new AstVarRef{flp, counterCountVars[ci], VAccess::READ},
+                    = new AstEq{flp, new AstVarRef{flp, counterCountVars[fi], VAccess::READ},
                                 new AstConst{flp, AstConst::WidthedValue{}, 32,
-                                             static_cast<uint32_t>(nfa.nodes[ci].counterMax)}};
+                                             static_cast<uint32_t>(
+                                                 tep->fromVtxp()->m_counterMax)}};
                 atEndp->dtypeSetBit();
                 AstNodeExpr* const expireContribp = new AstAnd{flp, srcSigp, atEndp};
                 expireContribp->dtypeSetBit();
                 rejectBasep = orExprs(flp, rejectBasep, expireContribp);
-            } else if (nfa.nodes[edge.fromId].isUnbounded
-                       || nfa.nodes[edge.fromId].isAndCombiner) {
-                // Liveness or SAnd combiner: accept only; sub-NFAs own their rejects.
+            } else if (tep->fromVtxp()->m_isUnbounded
+                       || tep->fromVtxp()->m_isAndCombiner) {
+                // Liveness or SAnd combiner: match only; sub-NFAs own their rejects.
                 terminalActivep = orExprs(flp, terminalActivep, srcSigp);
             } else {
                 terminalActivep = orExprs(flp, terminalActivep, srcSigp->cloneTreePure(false));
@@ -1070,13 +1154,14 @@ public:
         // E.g. `a |-> b ##...`: antecedent fires but b is false -- the attempt never
         // leaves the start state, so no terminal-based reject can fire.
         AstNodeExpr* requiredStepRejectp = nullptr;
-        for (const auto& edge : nfa.edges) {
-            if (!edge.rejectOnFail) continue;
-            if (edge.consumesCycle) continue;
-            if (!stateSig[edge.fromId]) continue;
-            if (!edge.condp) continue;
-            AstNodeExpr* const srcSigp = stateSig[edge.fromId]->cloneTreePure(false);
-            AstNodeExpr* const notCondp = new AstNot{flp, edge.condp->cloneTreePure(false)};
+        for (const SvaTransEdge* const tep : edges) {
+            if (!tep->m_rejectOnFail) continue;
+            if (tep->m_consumesCycle) continue;
+            const int fi = tep->fromVtxp()->color();
+            if (!stateSig[fi]) continue;
+            if (!tep->m_condp) continue;
+            AstNodeExpr* const srcSigp = stateSig[fi]->cloneTreePure(false);
+            AstNodeExpr* const notCondp = new AstNot{flp, tep->m_condp->cloneTreePure(false)};
             notCondp->dtypeSetBit();
             AstNodeExpr* const failp = new AstAnd{flp, srcSigp, notCondp};
             failp->dtypeSetBit();
@@ -1090,10 +1175,10 @@ public:
         // fail_i = state_active[i] && !$sampled(AND of throughout exprs).
         AstNodeExpr* throughoutRejectp = nullptr;
         for (int i = 0; i < N; ++i) {
-            const auto& conds = nfa.nodes[i].throughoutConds;
+            const auto& conds = vtx[i]->m_throughoutConds;
             if (conds.empty()) continue;
-            // SAnd combiner stateSig fires only at completion; sub-sequences own their nodes.
-            if (nfa.nodes[i].isAndCombiner) continue;
+            // SAnd combiner stateSig fires only at completion; sub-sequences own their vertices.
+            if (vtx[i]->m_isAndCombiner) continue;
             AstNodeExpr* stateExprp = nullptr;
             if (stateVars[i]) {
                 stateExprp = new AstVarRef{flp, stateVars[i], VAccess::READ};
@@ -1158,10 +1243,10 @@ public:
             if (isCover) {
                 if (terminalActivep) terminalActivep->deleteTree();
                 AstNodeExpr* negRejectp = nullptr;
-                if (acceptCondp && rejectBasep) {
+                if (matchCondp && rejectBasep) {
                     AstNodeExpr* const sampledCondp
-                        = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
-                    sampledCondp->dtypeFrom(acceptCondp);
+                        = new AstSampled{flp, matchCondp->cloneTreePure(false)};
+                    sampledCondp->dtypeFrom(matchCondp);
                     AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
                     notCondp->dtypeSetBit();
                     negRejectp = new AstAnd{flp, rejectBasep, notCondp};
@@ -1181,19 +1266,19 @@ public:
             }
             // Negated assert/assume: output = !accept.
             AstNodeExpr* acceptp = terminalActivep;
-            if (acceptCondp) {
+            if (matchCondp) {
                 AstNodeExpr* const sampledCondp
-                    = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
-                sampledCondp->dtypeFrom(acceptCondp);
+                    = new AstSampled{flp, matchCondp->cloneTreePure(false)};
+                sampledCondp->dtypeFrom(matchCondp);
                 acceptp = new AstAnd{flp, acceptp, sampledCondp};
                 acceptp->dtypeSetBit();
             }
-            if (outAcceptpp) {
+            if (outMatchpp) {
                 AstNodeExpr* notPAcceptp = nullptr;
-                if (acceptCondp && rejectBasep) {
+                if (matchCondp && rejectBasep) {
                     AstNodeExpr* const sampledCondp
-                        = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
-                    sampledCondp->dtypeFrom(acceptCondp);
+                        = new AstSampled{flp, matchCondp->cloneTreePure(false)};
+                    sampledCondp->dtypeFrom(matchCondp);
                     AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
                     notCondp->dtypeSetBit();
                     notPAcceptp = new AstAnd{flp, rejectBasep->cloneTreePure(false), notCondp};
@@ -1207,7 +1292,7 @@ public:
                 if (requiredStepRejectp)
                     notPAcceptp
                         = orExprs(flp, notPAcceptp, requiredStepRejectp->cloneTreePure(false));
-                *outAcceptpp = notPAcceptp;
+                *outMatchpp = notPAcceptp;
             }
             if (throughoutRejectp) throughoutRejectp->deleteTree();
             if (rejectBasep) rejectBasep->deleteTree();
@@ -1221,10 +1306,10 @@ public:
             if (throughoutRejectp) throughoutRejectp->deleteTree();
             if (rejectBasep) rejectBasep->deleteTree();
             if (requiredStepRejectp) requiredStepRejectp->deleteTree();
-            if (acceptCondp) {
+            if (matchCondp) {
                 AstNodeExpr* const sampledCondp
-                    = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
-                sampledCondp->dtypeFrom(acceptCondp);
+                    = new AstSampled{flp, matchCondp->cloneTreePure(false)};
+                sampledCondp->dtypeFrom(matchCondp);
                 AstNodeExpr* const acceptp = new AstAnd{flp, terminalActivep, sampledCondp};
                 acceptp->dtypeSetBit();
                 return acceptp;
@@ -1234,10 +1319,10 @@ public:
 
         // Assert/assume: output = !reject
         AstNodeExpr* rejectp = nullptr;
-        if (acceptCondp && rejectBasep) {
+        if (matchCondp && rejectBasep) {
             AstNodeExpr* const sampledCondp
-                = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
-            sampledCondp->dtypeFrom(acceptCondp);
+                = new AstSampled{flp, matchCondp->cloneTreePure(false)};
+            sampledCondp->dtypeFrom(matchCondp);
             AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
             notCondp->dtypeSetBit();
             rejectp = new AstAnd{flp, rejectBasep, notCondp};
@@ -1245,15 +1330,15 @@ public:
         } else if (rejectBasep) {
             rejectBasep->deleteTree();
         }
-        if (outAcceptpp) {
+        if (outMatchpp) {
             AstNodeExpr* acceptExprp = terminalActivep->cloneTreePure(false);
-            if (acceptCondp) {
-                AstNodeExpr* const sp = new AstSampled{flp, acceptCondp->cloneTreePure(false)};
+            if (matchCondp) {
+                AstNodeExpr* const sp = new AstSampled{flp, matchCondp->cloneTreePure(false)};
                 sp->dtypeSetBit();
                 acceptExprp = new AstAnd{flp, acceptExprp, sp};
                 acceptExprp->dtypeSetBit();
             }
-            *outAcceptpp = acceptExprp;
+            *outMatchpp = acceptExprp;
         }
         if (terminalActivep) terminalActivep->deleteTree();
 
@@ -1279,25 +1364,26 @@ public:
 
 class AssertNfaVisitor final : public VNVisitor {
     // STATE
-    AstNodeModule* m_modp = nullptr;
-    SvaNfaEmitter* m_emitterp = nullptr;
-    V3UniqueNames m_propVarNames{"__Vpropvar"};
-    V3UniqueNames m_disableCntNames{"__VnfaDis"};
+    AstNodeModule* m_modp = nullptr;  // Current module being processed
+    SvaNfaLowering* m_loweringp = nullptr;  // NFA-to-hardware lowering engine
+    V3UniqueNames m_propVarNames{"__Vpropvar"};  // Property-local variable names
+    V3UniqueNames m_disableCntNames{"__VnfaDis"};  // Disable-iff counter names
     std::set<const AstProperty*> m_inliningProps;  // Recursion guard for inlineNamedProperty
 
-    // Wire accept node and mid-window sources for a successful NFA build.
-    static void wireAcceptAndMidSources(SvaNfa& nfa, const BuildResult& result, FileLine* flp) {
-        nfa.createAcceptNode();
-        nfa.addLink(result.termNode, nfa.acceptNode);
-        for (int src : result.midSources) {
+    // Wire match vertex and mid-window sources for a successful NFA build.
+    static void wireMatchAndMidSources(SvaGraph& graph, const BuildResult& result,
+                                       FileLine* flp) {
+        graph.createMatchVertex();
+        graph.addLink(result.termVertexp, graph.m_matchVertexp);
+        for (SvaStateVertex* srcVtxp : result.midSources) {
             AstNodeExpr* condp = nullptr;
-            for (AstNodeExpr* const tc : nfa.nodes[src].throughoutConds) {
+            for (AstNodeExpr* const tc : srcVtxp->m_throughoutConds) {
                 AstNodeExpr* const tcClone = tc->cloneTreePure(false);
                 condp = condp ? new AstAnd{flp, condp, tcClone} : tcClone;
                 if (condp->width() != 1) condp->dtypeSetBit();
             }
-            nfa.addLink(src, nfa.acceptNode, condp);
-            nfa.nodes[src].isUnbounded = true;
+            graph.addLink(srcVtxp, graph.m_matchVertexp, condp);
+            srcVtxp->m_isUnbounded = true;
         }
     }
 
@@ -1321,7 +1407,7 @@ class AssertNfaVisitor final : public VNVisitor {
                              const AstProperty* propyp) {
         // Recursion guard: IEEE 1800-2023 16.12.1 forbids recursive properties.
         if (m_inliningProps.count(propyp)) {
-            funcrefp->v3error("Recursive property reference not allowed"
+            funcrefp->v3error("Illegal recursive property reference"
                               " (IEEE 1800-2023 16.12.1)");
             return;
         }
@@ -1357,18 +1443,14 @@ class AssertNfaVisitor final : public VNVisitor {
         }
 
         propSpecp->foreach([&](AstVarRef* refp) {
-            {
-                const auto portIt = portMap.find(refp->varp());
-                if (portIt != portMap.end()) {
-                    refp->replaceWith(portIt->second->cloneTree(false));
-                    VL_DO_DANGLING(pushDeletep(refp), refp);
-                    return;
-                }
+            const auto portIt = portMap.find(refp->varp());
+            if (portIt != portMap.end()) {
+                refp->replaceWith(portIt->second->cloneTree(false));
+                VL_DO_DANGLING(pushDeletep(refp), refp);
+                return;
             }
-            {
-                const auto localIt = localVarMap.find(refp->varp());
-                if (localIt != localVarMap.end()) { refp->varp(localIt->second); }
-            }
+            const auto localIt = localVarMap.find(refp->varp());
+            if (localIt != localVarMap.end()) refp->varp(localIt->second);
         });
 
         for (const auto& tconnect : tconnects) {
@@ -1400,7 +1482,7 @@ class AssertNfaVisitor final : public VNVisitor {
         VL_DO_DANGLING(pushDeletep(outerSpecp), outerSpecp);
     }
 
-    void inlineSequenceRef(AstFuncRef* funcrefp, const AstSequence* seqp) {
+    void inlineSequenceRef(AstFuncRef* funcrefp, AstSequence* seqp) {
         AstNodeExpr* const bodyExprp = getSequenceBodyExprp(seqp);
         UASSERT_OBJ(bodyExprp, funcrefp, "Sequence has no body expression");
         AstNodeExpr* const clonedp = bodyExprp->cloneTree(false);
@@ -1422,6 +1504,9 @@ class AssertNfaVisitor final : public VNVisitor {
         }
         funcrefp->replaceWith(clonedp);
         VL_DO_DANGLING(pushDeletep(funcrefp), funcrefp);
+        // Clear referenced flag so V3AssertPre cleanup does not emit
+        // spurious UNSUPPORTED for sequences that were already inlined here.
+        seqp->isReferenced(false);
     }
 
     // Must run before hasMultiCycleExpr() so NFA sees sequence bodies.
@@ -1431,7 +1516,7 @@ class AssertNfaVisitor final : public VNVisitor {
             changed = false;
             rootp->foreach([&](AstFuncRef* funcrefp) {
                 if (changed) return;
-                if (const AstSequence* const seqp = VN_CAST(funcrefp->taskp(), Sequence)) {
+                if (AstSequence* const seqp = VN_CAST(funcrefp->taskp(), Sequence)) {
                     inlineSequenceRef(funcrefp, seqp);
                     changed = true;
                 }
@@ -1440,10 +1525,9 @@ class AssertNfaVisitor final : public VNVisitor {
     }
 
     static bool hasMultiCycleExpr(const AstNode* nodep) {
-        return !nodep->forall([](const AstNode* np) {
-            return !VN_IS(np, SExpr) && !VN_IS(np, SConsRep) && !VN_IS(np, SGotoRep)
-                   && !VN_IS(np, SIntersect) && !VN_IS(np, SThroughout) && !VN_IS(np, SAnd)
-                   && !VN_IS(np, SOr) && !VN_IS(np, SNonConsRep);
+        return nodep->exists([](const AstNode* np) {
+            if (const auto* const ep = VN_CAST(np, NodeExpr)) return ep->isMultiCycleSva();
+            return false;
         });
     }
 
@@ -1513,14 +1597,15 @@ class AssertNfaVisitor final : public VNVisitor {
         FileLine* const flp = assertp->fileline();
         const bool isCover = VN_IS(assertp, Cover);
 
-        SvaNfa nfa;
-        SvaNfaBuilder builder{nfa};
+        SvaGraph graph;
+        SvaNfaBuilder builder{graph};
 
         BuildResult result = BuildResult::fail();
         if (parts.hasImplication) {
-            nfa.startNode = nfa.createNode();
+            graph.m_startVertexp = graph.createStateVertex();
 
-            const BuildResult antResult = builder.buildExpr(parts.triggerExprp, nfa.startNode);
+            const BuildResult antResult
+                = builder.buildExpr(parts.triggerExprp, graph.m_startVertexp);
             if (!antResult.valid()) {
                 // Fall through to V3AssertPre for unsupported constructs.
                 // Only replace with BitFalse on real semantic errors.
@@ -1535,32 +1620,33 @@ class AssertNfaVisitor final : public VNVisitor {
                 return;
             }
 
-            // Use raw createNode() (not scopedCreateNode) so trigNode starts without liveness.
-            // Reaching the antecedent terminal is a definitive event; consequent must fire.
-            const int trigNode = nfa.createNode();
+            // Use raw createStateVertex() (not scopedCreateVertex) so trigVtxp starts
+            // without liveness.  Reaching the antecedent terminal is a definitive event.
+            SvaStateVertex* const trigVtxp = graph.createStateVertex();
             if (antResult.finalCondp) {
-                nfa.addLink(antResult.termNode, trigNode,
-                            new AstSampled{flp, antResult.finalCondp->cloneTreePure(false)});
+                graph.addLink(antResult.termVertexp, trigVtxp,
+                              new AstSampled{flp,
+                                             antResult.finalCondp->cloneTreePure(false)});
                 if (!antResult.finalCondp->backp()) antResult.finalCondp->deleteTree();
             } else {
-                nfa.addLink(antResult.termNode, trigNode);
+                graph.addLink(antResult.termVertexp, trigVtxp);
             }
             builder.resetScope();
 
             if (parts.isOverlapped) {
-                result = builder.buildExpr(seqBodyp, trigNode,
+                result = builder.buildExpr(seqBodyp, trigVtxp,
                                            /*isTopLevelStep=*/true);
             } else {
-                const int delayNode = nfa.createNode();
-                nfa.addClockEdge(trigNode, delayNode);
-                result = builder.buildExpr(seqBodyp, delayNode,
+                SvaStateVertex* const delayVtxp = graph.createStateVertex();
+                graph.addClockedEdge(trigVtxp, delayVtxp);
+                result = builder.buildExpr(seqBodyp, delayVtxp,
                                            /*isTopLevelStep=*/true);
             }
 
-            if (result.valid()) wireAcceptAndMidSources(nfa, result, flp);
+            if (result.valid()) wireMatchAndMidSources(graph, result, flp);
         } else {
             result = builder.build(seqBodyp);
-            if (result.valid()) wireAcceptAndMidSources(nfa, result, flp);
+            if (result.valid()) wireMatchAndMidSources(graph, result, flp);
         }
 
         if (!result.valid()) {
@@ -1623,7 +1709,7 @@ class AssertNfaVisitor final : public VNVisitor {
         AstAssert* const assertAssertp = VN_CAST(assertp, Assert);
         const bool needAccept
             = !isCover && !parts.hasImplication && assertAssertp && assertAssertp->passsp();
-        AstNodeExpr* acceptExprp = nullptr;
+        AstNodeExpr* matchExprp = nullptr;
 
         AstAssert* const assertWithFailp = VN_CAST(assertp, Assert);
         const bool needPerSrcFail
@@ -1632,10 +1718,11 @@ class AssertNfaVisitor final : public VNVisitor {
 
         AstNodeExpr* const alwaysTriggerp = new AstConst{flp, AstConst::BitTrue{}};
         AstNodeExpr* const outputExprp
-            = m_emitterp->emit(flp, nfa, alwaysTriggerp, senTreep, result.finalCondp, isCover,
-                               disableExprp ? disableExprp->cloneTreePure(false) : nullptr,
-                               negated, needAccept ? &acceptExprp : nullptr, disableCntVarp,
-                               snapshotVarp, needPerSrcFail ? &requiredStepSrcs : nullptr);
+            = m_loweringp->lower(flp, graph, alwaysTriggerp, senTreep, result.finalCondp,
+                                 isCover,
+                                 disableExprp ? disableExprp->cloneTreePure(false) : nullptr,
+                                 negated, needAccept ? &matchExprp : nullptr, disableCntVarp,
+                                 snapshotVarp, needPerSrcFail ? &requiredStepSrcs : nullptr);
 
         AstSenTree* const perSrcSenTreep
             = (requiredStepSrcs.size() >= 2) ? senTreep->cloneTree(false) : nullptr;
@@ -1645,24 +1732,24 @@ class AssertNfaVisitor final : public VNVisitor {
         if (disableExprUnlinked) disableExprp->deleteTree();
         if (result.finalCondp && !result.finalCondp->backp()) { result.finalCondp->deleteTree(); }
 
-        // Gate pass handler on accept to prevent vacuous-pass firings.
-        if (needAccept && acceptExprp) {
+        // Gate pass handler on match to prevent vacuous-pass firings.
+        if (needAccept && matchExprp) {
             AstNode* passsp = assertAssertp->passsp();
             if (passsp) {
                 passsp->unlinkFrBackWithNext();
-                assertAssertp->addPasssp(new AstIf{flp, acceptExprp->cloneTreePure(false),
+                assertAssertp->addPasssp(new AstIf{flp, matchExprp->cloneTreePure(false),
                                                    passsp->cloneTree(false), nullptr});
                 // Fail-handler prefix for overlapping instances (IEEE 16.12):
-                // fires when reject=1 && accept=1 in the same cycle.
+                // fires when reject=1 && match=1 in the same cycle.
                 if (AstNode* const failsp = assertAssertp->failsp()) {
                     failsp->addHereThisAsNext(
-                        new AstIf{flp, acceptExprp, passsp->cloneTree(false), nullptr});
+                        new AstIf{flp, matchExprp, passsp->cloneTree(false), nullptr});
                 } else {
-                    acceptExprp->deleteTree();
+                    matchExprp->deleteTree();
                 }
                 VL_DO_DANGLING(pushDeletep(passsp), passsp);
             } else {
-                acceptExprp->deleteTree();
+                matchExprp->deleteTree();
             }
         }
 
@@ -1705,17 +1792,16 @@ class AssertNfaVisitor final : public VNVisitor {
             VL_DO_DANGLING(pushDeletep(oldPropp), oldPropp);
         }
 
-        UINFO(4, "NFA converted assertion at " << flp << ", " << nfa.nodes.size() << " nodes, "
-                                               << nfa.edges.size() << " edges" << endl);
+        UINFO(4, "NFA converted assertion at " << flp << endl);
     }
 
     // VISITORS
     void visit(AstNodeModule* nodep) override {
         VL_RESTORER(m_modp);
-        VL_RESTORER(m_emitterp);
+        VL_RESTORER(m_loweringp);
         m_modp = nodep;
-        SvaNfaEmitter emitter{nodep};
-        m_emitterp = &emitter;
+        SvaNfaLowering lowering{nodep};
+        m_loweringp = &lowering;
         iterateChildren(nodep);
     }
     void visit(AstAssert* nodep) override { processAssertion(nodep); }
