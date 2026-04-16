@@ -569,7 +569,6 @@ class SvaNfaBuilder final {
             if (lhs.finalCondp && rhs.finalCondp) {
                 condp = new AstAnd{flp, lhs.finalCondp->cloneTreePure(false),
                                    rhs.finalCondp->cloneTreePure(false)};
-                condp->dtypeSetBit();
             } else if (lhs.finalCondp) {
                 condp = lhs.finalCondp;
             } else {
@@ -744,6 +743,329 @@ class SvaNfaLowering final {
         AstNodeExpr* requiredStepRejectp = nullptr;
         AstNodeExpr* throughoutRejectp = nullptr;
     };
+
+    // Phase 2/2b/2c: Emit NBA state-update always blocks for registered vertices,
+    // counter FSMs, and SAnd combiner done-latches.
+    void emitNbaLogic(LowerCtx& c) {
+        // Phase 2: Compute Edge activations -> NBA
+        AstNode* bodyp = nullptr;
+        for (int i = 0; i < c.N; ++i) {
+            if (!c.stateVars[i]) continue;
+
+            AstNodeExpr* nextStatep = nullptr;
+            for (const V3GraphEdge& er : c.vtx[i]->inEdges()) {
+                const SvaTransEdge& te = static_cast<const SvaTransEdge&>(er);
+                if (!te.m_consumesCycle) continue;
+                const int fromIdx = te.fromVtxp()->color();
+                if (!c.stateSig[fromIdx]) continue;
+
+                AstNodeExpr* srcSigp = c.stateSig[fromIdx]->cloneTreePure(false);
+                srcSigp = andCond(c.flp, srcSigp, te.m_condp);
+
+                if (c.disableExprp && !c.snapshotVarp) {
+                    AstNodeExpr* const notDisp
+                        = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
+                    notDisp->dtypeSetBit();
+                    srcSigp = new AstAnd{c.flp, srcSigp, notDisp};
+                }
+                nextStatep = orExprs(c.flp, nextStatep, srcSigp);
+            }
+
+            if (!nextStatep) nextStatep = new AstConst{c.flp, AstConst::BitFalse{}};
+
+            AstAssignDly* const assignp = new AstAssignDly{
+                c.flp, new AstVarRef{c.flp, c.stateVars[i], VAccess::WRITE}, nextStatep};
+            if (!bodyp) {
+                bodyp = assignp;
+            } else {
+                bodyp->addNext(assignp);
+            }
+        }
+
+        if (bodyp) {
+            // Capture disableCnt in Phase-2 NBA before any reactive re-evaluation.
+            if (c.snapshotVarp && c.disableCntVarp) {
+                AstAssignDly* const snapAssignp = new AstAssignDly{
+                    c.flp, new AstVarRef{c.flp, c.snapshotVarp, VAccess::WRITE},
+                    new AstVarRef{c.flp, c.disableCntVarp, VAccess::READ}};
+                bodyp->addNext(snapAssignp);
+            }
+            AstAlways* const alwaysp = new AstAlways{c.flp, VAlwaysKwd::ALWAYS,
+                                                      c.senTreep->cloneTree(false), bodyp};
+            m_modp->addStmtsp(alwaysp);
+        }
+
+        // Phase 2b: Counter FSM always block.
+        // if (active) { if (done) active<=0; else counter<=counter+1; }
+        // else if (incoming) { active<=1; counter<=0; }
+        for (int ci = 0; ci < c.N; ++ci) {
+            if (!c.counterActiveVars[ci]) continue;
+            AstVar* const activep = c.counterActiveVars[ci];
+            AstVar* const cntp = c.counterCountVars[ci];
+            const uint32_t counterMax = static_cast<uint32_t>(c.vtx[ci]->m_counterMax);
+
+            AstNodeExpr* incomingp = nullptr;
+            for (const SvaTransEdge* const tep : c.edges) {
+                if (tep->toVtxp()->color() != ci) continue;
+                if (!tep->m_consumesCycle) continue;
+                const int fi = tep->fromVtxp()->color();
+                if (!c.stateSig[fi]) continue;
+                AstNodeExpr* contribp = c.stateSig[fi]->cloneTreePure(false);
+                contribp = andCond(c.flp, contribp, tep->m_condp);
+                if (c.disableExprp) {
+                    AstNodeExpr* const notDisp
+                        = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
+                    notDisp->dtypeSetBit();
+                    contribp = new AstAnd{c.flp, contribp, notDisp};
+                }
+                incomingp = orExprs(c.flp, incomingp, contribp);
+            }
+            if (!incomingp) incomingp = new AstConst{c.flp, AstConst::BitFalse{}};
+
+            AstNodeExpr* inWindowp = nullptr;
+            if (c.vtx[ci]->m_counterMin == 0) {
+                inWindowp = new AstConst{c.flp, AstConst::BitTrue{}};
+            } else {
+                inWindowp
+                    = new AstGte{c.flp, new AstVarRef{c.flp, cntp, VAccess::READ},
+                                 new AstConst{c.flp, AstConst::WidthedValue{}, 32,
+                                              static_cast<uint32_t>(c.vtx[ci]->m_counterMin)}};
+                inWindowp->dtypeSetBit();
+            }
+            AstNodeExpr* acceptedNowp = nullptr;
+            if (c.matchCondp) {
+                AstSampled* const sampp
+                    = new AstSampled{c.flp, c.matchCondp->cloneTreePure(false)};
+                sampp->dtypeSetBit();
+                acceptedNowp = new AstAnd{c.flp, inWindowp, sampp};
+            } else {
+                acceptedNowp = inWindowp;
+            }
+
+            AstNodeExpr* const counterAtEndp
+                = new AstEq{c.flp, new AstVarRef{c.flp, cntp, VAccess::READ},
+                            new AstConst{c.flp, AstConst::WidthedValue{}, 32, counterMax}};
+            counterAtEndp->dtypeSetBit();
+
+            AstNodeExpr* const donep = new AstOr{c.flp, acceptedNowp, counterAtEndp};
+
+            AstAssignDly* const clearActivep
+                = new AstAssignDly{c.flp, new AstVarRef{c.flp, activep, VAccess::WRITE},
+                                   new AstConst{c.flp, AstConst::BitFalse{}}};
+            AstAdd* const addExprp
+                = new AstAdd{c.flp, new AstVarRef{c.flp, cntp, VAccess::READ},
+                             new AstConst{c.flp, AstConst::WidthedValue{}, 32, 1u}};
+            addExprp->dtypeFrom(cntp);
+            AstAssignDly* const incCountp
+                = new AstAssignDly{c.flp, new AstVarRef{c.flp, cntp, VAccess::WRITE}, addExprp};
+            AstIf* const doneIfp = new AstIf{c.flp, donep, clearActivep, incCountp};
+
+            AstAssignDly* const setActivep
+                = new AstAssignDly{c.flp, new AstVarRef{c.flp, activep, VAccess::WRITE},
+                                   new AstConst{c.flp, AstConst::BitTrue{}}};
+            AstAssignDly* const resetCountp
+                = new AstAssignDly{c.flp, new AstVarRef{c.flp, cntp, VAccess::WRITE},
+                                   new AstConst{c.flp, AstConst::WidthedValue{}, 32, 0u}};
+            setActivep->addNext(resetCountp);
+            AstIf* const startIfp = new AstIf{c.flp, incomingp, setActivep, nullptr};
+            AstIf* const topIfp = new AstIf{c.flp,
+                                             new AstVarRef{c.flp, activep, VAccess::READ},
+                                             doneIfp, startIfp};
+
+            m_modp->addStmtsp(new AstAlways{c.flp, VAlwaysKwd::ALWAYS,
+                                             c.senTreep->cloneTree(false), topIfp});
+        }
+
+        // Phase 2c: SAnd combiner done-latch always block.
+        // NBA semantics ensure doneL/doneR read pre-update values (IEEE 16.9.5).
+        for (int ai = 0; ai < c.N; ++ai) {
+            if (!c.doneLVars[ai]) continue;
+            const SvaStateVertex* const avp = c.vtx[ai];
+            const int l = avp->m_andLhsTermp ? avp->m_andLhsTermp->color() : -1;
+            const int r = avp->m_andRhsTermp ? avp->m_andRhsTermp->color() : -1;
+            if (l < 0 || r < 0) continue;
+            if (!c.stateSig[l] || !c.stateSig[r] || !c.stateSig[ai]) continue;
+
+            AstAssignDly* const clearLp
+                = new AstAssignDly{c.flp, new AstVarRef{c.flp, c.doneLVars[ai], VAccess::WRITE},
+                                   new AstConst{c.flp, AstConst::BitFalse{}}};
+            AstAssignDly* const clearRp
+                = new AstAssignDly{c.flp, new AstVarRef{c.flp, c.doneRVars[ai], VAccess::WRITE},
+                                   new AstConst{c.flp, AstConst::BitFalse{}}};
+            clearLp->addNext(clearRp);
+
+            AstNodeExpr* const matchLNowp
+                = buildMatchNow(c.flp, c.stateSig[l], avp->m_andLhsCondp);
+            AstNodeExpr* const matchRNowp
+                = buildMatchNow(c.flp, c.stateSig[r], avp->m_andRhsCondp);
+            AstNodeExpr* gateLp = matchLNowp;
+            AstNodeExpr* gateRp = matchRNowp;
+            if (c.disableExprp) {
+                AstNodeExpr* const notDisLp
+                    = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
+                notDisLp->dtypeSetBit();
+                gateLp = new AstAnd{c.flp, gateLp, notDisLp};
+                AstNodeExpr* const notDisRp
+                    = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
+                notDisRp->dtypeSetBit();
+                gateRp = new AstAnd{c.flp, gateRp, notDisRp};
+            }
+            AstAssignDly* const setLp
+                = new AstAssignDly{c.flp, new AstVarRef{c.flp, c.doneLVars[ai], VAccess::WRITE},
+                                   new AstConst{c.flp, AstConst::BitTrue{}}};
+            AstIf* const setLIfp = new AstIf{c.flp, gateLp, setLp, nullptr};
+            AstAssignDly* const setRp
+                = new AstAssignDly{c.flp, new AstVarRef{c.flp, c.doneRVars[ai], VAccess::WRITE},
+                                   new AstConst{c.flp, AstConst::BitTrue{}}};
+            AstIf* const setRIfp = new AstIf{c.flp, gateRp, setRp, nullptr};
+            setLIfp->addNext(setRIfp);
+
+            AstIf* const topp
+                = new AstIf{c.flp, c.stateSig[ai]->cloneTreePure(false), clearLp, setLIfp};
+            m_modp->addStmtsp(new AstAlways{c.flp, VAlwaysKwd::ALWAYS,
+                                             c.senTreep->cloneTree(false), topp});
+        }
+    }
+
+    // Phase 3/3a/3b: Compute terminal match/reject signals, required-step reject,
+    // throughout-drop reject; clean up intermediate state signals.
+    SignalSet computeSignals(LowerCtx& c,
+                             std::vector<AstNodeExpr*>* outRequiredStepSrcsp) {
+        SignalSet sigs;
+
+        // Snapshot comparison expression for disable-iff counter.
+        AstNodeExpr* snapshotOkp = nullptr;
+        if (c.snapshotVarp && c.disableCntVarp) {
+            snapshotOkp = new AstEq{c.flp,
+                                    new AstVarRef{c.flp, c.snapshotVarp, VAccess::READ},
+                                    new AstVarRef{c.flp, c.disableCntVarp, VAccess::READ}};
+            snapshotOkp->dtypeSetBit();
+        }
+
+        // Phase 3: Compute accept/reject from terminal Links.
+        for (const SvaTransEdge* const tep : c.edges) {
+            if (tep->toVtxp() != c.graph.m_matchVertexp) continue;
+            if (tep->m_consumesCycle) continue;
+            const int fi = tep->fromVtxp()->color();
+            if (!c.stateSig[fi]) continue;
+
+            AstNodeExpr* srcSigp = c.stateSig[fi]->cloneTreePure(false);
+            srcSigp = andCond(c.flp, srcSigp, tep->m_condp);
+            if (snapshotOkp) {
+                srcSigp = new AstAnd{c.flp, srcSigp, snapshotOkp->cloneTreePure(false)};
+            }
+
+            if (tep->fromVtxp()->m_isCounter) {
+                sigs.terminalActivep
+                    = orExprs(c.flp, sigs.terminalActivep, srcSigp->cloneTreePure(false));
+                AstNodeExpr* const atEndp = new AstEq{
+                    c.flp, new AstVarRef{c.flp, c.counterCountVars[fi], VAccess::READ},
+                    new AstConst{c.flp, AstConst::WidthedValue{}, 32,
+                                 static_cast<uint32_t>(tep->fromVtxp()->m_counterMax)}};
+                atEndp->dtypeSetBit();
+                AstNodeExpr* const expireContribp = new AstAnd{c.flp, srcSigp, atEndp};
+                sigs.rejectBasep = orExprs(c.flp, sigs.rejectBasep, expireContribp);
+            } else if (tep->fromVtxp()->m_isUnbounded || tep->fromVtxp()->m_isAndCombiner) {
+                sigs.terminalActivep = orExprs(c.flp, sigs.terminalActivep, srcSigp);
+            } else {
+                sigs.terminalActivep
+                    = orExprs(c.flp, sigs.terminalActivep, srcSigp->cloneTreePure(false));
+                sigs.rejectBasep = orExprs(c.flp, sigs.rejectBasep, srcSigp);
+            }
+        }
+
+        if (!sigs.terminalActivep) {
+            for (int i = c.N - 1; i >= 0; --i) {
+                if (c.stateVars[i] && c.stateSig[i]) {
+                    sigs.terminalActivep = c.stateSig[i]->cloneTreePure(false);
+                    break;
+                }
+            }
+        }
+        if (!sigs.terminalActivep) {
+            sigs.terminalActivep = new AstConst{c.flp, AstConst::BitFalse{}};
+        }
+
+        // Phase 3a: required-step rejection.
+        for (const SvaTransEdge* const tep : c.edges) {
+            if (!tep->m_rejectOnFail) continue;
+            if (tep->m_consumesCycle) continue;
+            const int fi = tep->fromVtxp()->color();
+            if (!c.stateSig[fi]) continue;
+            if (!tep->m_condp) continue;
+            AstNodeExpr* const srcSigp = c.stateSig[fi]->cloneTreePure(false);
+            AstNodeExpr* const notCondp = new AstNot{c.flp, tep->m_condp->cloneTreePure(false)};
+            notCondp->dtypeSetBit();
+            AstNodeExpr* const failp = new AstAnd{c.flp, srcSigp, notCondp};
+            if (outRequiredStepSrcsp) {
+                outRequiredStepSrcsp->push_back(failp->cloneTreePure(false));
+            }
+            sigs.requiredStepRejectp = orExprs(c.flp, sigs.requiredStepRejectp, failp);
+        }
+
+        // Phase 3b: Throughout-drop rejection (IEEE 16.9.9).
+        for (int i = 0; i < c.N; ++i) {
+            const auto& conds = c.vtx[i]->m_throughoutConds;
+            if (conds.empty()) continue;
+            if (c.vtx[i]->m_isAndCombiner) continue;
+            AstNodeExpr* stateExprp = nullptr;
+            if (c.stateVars[i]) {
+                stateExprp = new AstVarRef{c.flp, c.stateVars[i], VAccess::READ};
+            } else if (c.stateSig[i]) {
+                stateExprp = c.stateSig[i]->cloneTreePure(false);
+            } else {
+                continue;
+            }
+            AstNodeExpr* guardp = nullptr;
+            for (AstNodeExpr* const cp : conds) {
+                AstSampled* const sp = new AstSampled{c.flp, cp->cloneTreePure(false)};
+                sp->dtypeSetBit();
+                if (!guardp) {
+                    guardp = sp;
+                } else {
+                    guardp = new AstAnd{c.flp, guardp, sp};
+                }
+            }
+            AstNodeExpr* const notGuardp = new AstNot{c.flp, guardp};
+            notGuardp->dtypeSetBit();
+            AstNodeExpr* const failp = new AstAnd{c.flp, stateExprp, notGuardp};
+            sigs.throughoutRejectp = orExprs(c.flp, sigs.throughoutRejectp, failp);
+        }
+
+        // Clean up intermediate state signals.
+        for (int i = 0; i < c.N; ++i) {
+            if (c.stateSig[i]) {
+                c.stateSig[i]->deleteTree();
+                c.stateSig[i] = nullptr;
+            }
+        }
+        // Disable iff gating on throughout/required-step rejects (IEEE 16.12).
+        if (c.disableExprp) {
+            if (sigs.throughoutRejectp) {
+                AstNodeExpr* const notDisp
+                    = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
+                notDisp->dtypeSetBit();
+                sigs.throughoutRejectp = new AstAnd{c.flp, sigs.throughoutRejectp, notDisp};
+            }
+            if (sigs.requiredStepRejectp) {
+                AstNodeExpr* const notDisp
+                    = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
+                notDisp->dtypeSetBit();
+                sigs.requiredStepRejectp = new AstAnd{c.flp, sigs.requiredStepRejectp, notDisp};
+            }
+        }
+
+        if (snapshotOkp) {
+            snapshotOkp->deleteTree();
+            snapshotOkp = nullptr;
+        }
+        if (c.disableExprp) {
+            c.disableExprp->deleteTree();
+            c.disableExprp = nullptr;
+        }
+
+        return sigs;
+    }
 
     // Phase 1: Resolve combinational Links via fixed-point propagation.
     void resolveLinks(LowerCtx& c, AstNodeExpr* triggerExprp) {
@@ -1024,335 +1346,16 @@ public:
 
         // Phase 1: Resolve combinational Links via fixed-point propagation.
         resolveLinks(c, triggerExprp);
-        auto& stateSig = c.stateSig;
 
-        // Phase 2: Compute Edge activations -> NBA
-        AstNode* bodyp = nullptr;
-        for (int i = 0; i < N; ++i) {
-            if (!stateVars[i]) continue;
+        // Phase 2/2b/2c: Emit NBA state-update, counter FSM, and SAnd done-latch logic.
+        emitNbaLogic(c);
 
-            AstNodeExpr* nextStatep = nullptr;
-            for (const V3GraphEdge& er : vtx[i]->inEdges()) {
-                const SvaTransEdge& te = static_cast<const SvaTransEdge&>(er);
-                if (!te.m_consumesCycle) continue;
-                const int fromIdx = te.fromVtxp()->color();
-                if (!stateSig[fromIdx]) continue;
+        // Phase 3/3a/3b: Compute terminal match/reject signals (cleans up stateSig).
+        const SignalSet sigs = computeSignals(c, outRequiredStepSrcsp);
 
-                AstNodeExpr* srcSigp = stateSig[fromIdx]->cloneTreePure(false);
-                srcSigp = andCond(flp, srcSigp, te.m_condp);
-
-                if (disableExprp && !snapshotVarp) {
-                    AstNodeExpr* const notDisp
-                        = new AstNot{flp, disableExprp->cloneTreePure(false)};
-                    notDisp->dtypeSetBit();
-                    srcSigp = new AstAnd{flp, srcSigp, notDisp};
-                    srcSigp->dtypeSetBit();
-                }
-                nextStatep = orExprs(flp, nextStatep, srcSigp);
-            }
-
-            if (!nextStatep) nextStatep = new AstConst{flp, AstConst::BitFalse{}};
-
-            AstAssignDly* const assignp = new AstAssignDly{
-                flp, new AstVarRef{flp, stateVars[i], VAccess::WRITE}, nextStatep};
-            if (!bodyp) {
-                bodyp = assignp;
-            } else {
-                bodyp->addNext(assignp);
-            }
-        }
-
-        if (bodyp) {
-            // Capture disableCnt in Phase-2 NBA before any reactive re-evaluation.
-            if (snapshotVarp && disableCntVarp) {
-                AstAssignDly* const snapAssignp
-                    = new AstAssignDly{flp, new AstVarRef{flp, snapshotVarp, VAccess::WRITE},
-                                       new AstVarRef{flp, disableCntVarp, VAccess::READ}};
-                bodyp->addNext(snapAssignp);
-            }
-            AstAlways* const alwaysp
-                = new AstAlways{flp, VAlwaysKwd::ALWAYS, senTreep->cloneTree(false), bodyp};
-            m_modp->addStmtsp(alwaysp);
-        }
-
-        // Phase 2b: Counter FSM always block.
-        // if (active) { if (done) active<=0; else counter<=counter+1; }
-        // else if (incoming) { active<=1; counter<=0; }
-        for (int ci = 0; ci < N; ++ci) {
-            if (!counterActiveVars[ci]) continue;
-            AstVar* const activep = counterActiveVars[ci];
-            AstVar* const cntp = counterCountVars[ci];
-            const uint32_t counterMax = static_cast<uint32_t>(vtx[ci]->m_counterMax);
-
-            AstNodeExpr* incomingp = nullptr;
-            for (const SvaTransEdge* const tep : edges) {
-                if (tep->toVtxp()->color() != ci) continue;
-                if (!tep->m_consumesCycle) continue;
-                const int fi = tep->fromVtxp()->color();
-                if (!stateSig[fi]) continue;
-                AstNodeExpr* contribp = stateSig[fi]->cloneTreePure(false);
-                contribp = andCond(flp, contribp, tep->m_condp);
-                if (disableExprp) {
-                    AstNodeExpr* const notDisp
-                        = new AstNot{flp, disableExprp->cloneTreePure(false)};
-                    notDisp->dtypeSetBit();
-                    contribp = new AstAnd{flp, contribp, notDisp};
-                    contribp->dtypeSetBit();
-                }
-                incomingp = orExprs(flp, incomingp, contribp);
-            }
-            if (!incomingp) incomingp = new AstConst{flp, AstConst::BitFalse{}};
-
-            AstNodeExpr* inWindowp = nullptr;
-            if (vtx[ci]->m_counterMin == 0) {
-                inWindowp = new AstConst{flp, AstConst::BitTrue{}};
-            } else {
-                inWindowp = new AstGte{flp, new AstVarRef{flp, cntp, VAccess::READ},
-                                       new AstConst{flp, AstConst::WidthedValue{}, 32,
-                                                    static_cast<uint32_t>(vtx[ci]->m_counterMin)}};
-                inWindowp->dtypeSetBit();
-            }
-            AstNodeExpr* acceptedNowp = nullptr;
-            if (matchCondp) {
-                AstSampled* const sampp = new AstSampled{flp, matchCondp->cloneTreePure(false)};
-                sampp->dtypeSetBit();
-                acceptedNowp = new AstAnd{flp, inWindowp, sampp};
-                acceptedNowp->dtypeSetBit();
-            } else {
-                acceptedNowp = inWindowp;
-            }
-
-            AstNodeExpr* const counterAtEndp
-                = new AstEq{flp, new AstVarRef{flp, cntp, VAccess::READ},
-                            new AstConst{flp, AstConst::WidthedValue{}, 32, counterMax}};
-            counterAtEndp->dtypeSetBit();
-
-            AstNodeExpr* const donep = new AstOr{flp, acceptedNowp, counterAtEndp};
-            donep->dtypeSetBit();
-
-            AstAssignDly* const clearActivep
-                = new AstAssignDly{flp, new AstVarRef{flp, activep, VAccess::WRITE},
-                                   new AstConst{flp, AstConst::BitFalse{}}};
-            AstAdd* const addExprp
-                = new AstAdd{flp, new AstVarRef{flp, cntp, VAccess::READ},
-                             new AstConst{flp, AstConst::WidthedValue{}, 32, 1u}};
-            addExprp->dtypeFrom(cntp);
-            AstAssignDly* const incCountp
-                = new AstAssignDly{flp, new AstVarRef{flp, cntp, VAccess::WRITE}, addExprp};
-            AstIf* const doneIfp = new AstIf{flp, donep, clearActivep, incCountp};
-
-            AstAssignDly* const setActivep
-                = new AstAssignDly{flp, new AstVarRef{flp, activep, VAccess::WRITE},
-                                   new AstConst{flp, AstConst::BitTrue{}}};
-            AstAssignDly* const resetCountp
-                = new AstAssignDly{flp, new AstVarRef{flp, cntp, VAccess::WRITE},
-                                   new AstConst{flp, AstConst::WidthedValue{}, 32, 0u}};
-            setActivep->addNext(resetCountp);
-            AstIf* const startIfp = new AstIf{flp, incomingp, setActivep, nullptr};
-            AstIf* const topIfp
-                = new AstIf{flp, new AstVarRef{flp, activep, VAccess::READ}, doneIfp, startIfp};
-
-            AstAlways* const counterAlwaysp
-                = new AstAlways{flp, VAlwaysKwd::ALWAYS, senTreep->cloneTree(false), topIfp};
-            m_modp->addStmtsp(counterAlwaysp);
-        }
-
-        // Phase 2c: SAnd combiner done-latch always block.
-        // NBA semantics ensure doneL/doneR read pre-update values (IEEE 16.9.5).
-        for (int ai = 0; ai < N; ++ai) {
-            if (!doneLVars[ai]) continue;
-            const SvaStateVertex* const avp = vtx[ai];
-            const int l = avp->m_andLhsTermp ? avp->m_andLhsTermp->color() : -1;
-            const int r = avp->m_andRhsTermp ? avp->m_andRhsTermp->color() : -1;
-            if (l < 0 || r < 0) continue;
-            if (!stateSig[l] || !stateSig[r] || !stateSig[ai]) continue;
-
-            AstAssignDly* const clearLp
-                = new AstAssignDly{flp, new AstVarRef{flp, doneLVars[ai], VAccess::WRITE},
-                                   new AstConst{flp, AstConst::BitFalse{}}};
-            AstAssignDly* const clearRp
-                = new AstAssignDly{flp, new AstVarRef{flp, doneRVars[ai], VAccess::WRITE},
-                                   new AstConst{flp, AstConst::BitFalse{}}};
-            clearLp->addNext(clearRp);
-
-            AstNodeExpr* const matchLNowp = buildMatchNow(flp, stateSig[l], avp->m_andLhsCondp);
-            AstNodeExpr* const matchRNowp = buildMatchNow(flp, stateSig[r], avp->m_andRhsCondp);
-            AstNodeExpr* gateLp = matchLNowp;
-            AstNodeExpr* gateRp = matchRNowp;
-            if (disableExprp) {
-                AstNodeExpr* const notDisLp = new AstNot{flp, disableExprp->cloneTreePure(false)};
-                notDisLp->dtypeSetBit();
-                gateLp = new AstAnd{flp, gateLp, notDisLp};
-                gateLp->dtypeSetBit();
-                AstNodeExpr* const notDisRp = new AstNot{flp, disableExprp->cloneTreePure(false)};
-                notDisRp->dtypeSetBit();
-                gateRp = new AstAnd{flp, gateRp, notDisRp};
-                gateRp->dtypeSetBit();
-            }
-            AstAssignDly* const setLp
-                = new AstAssignDly{flp, new AstVarRef{flp, doneLVars[ai], VAccess::WRITE},
-                                   new AstConst{flp, AstConst::BitTrue{}}};
-            AstIf* const setLIfp = new AstIf{flp, gateLp, setLp, nullptr};
-            AstAssignDly* const setRp
-                = new AstAssignDly{flp, new AstVarRef{flp, doneRVars[ai], VAccess::WRITE},
-                                   new AstConst{flp, AstConst::BitTrue{}}};
-            AstIf* const setRIfp = new AstIf{flp, gateRp, setRp, nullptr};
-            setLIfp->addNext(setRIfp);
-
-            AstIf* const topp
-                = new AstIf{flp, stateSig[ai]->cloneTreePure(false), clearLp, setLIfp};
-            AstAlways* const combAlwaysp
-                = new AstAlways{flp, VAlwaysKwd::ALWAYS, senTreep->cloneTree(false), topp};
-            m_modp->addStmtsp(combAlwaysp);
-        }
-
-        // Phase 3: Compute accept/reject from terminal Links.
-        // rejectBasep: counter sources only at window end; others on every terminal cycle.
-        AstNodeExpr* snapshotOkp = nullptr;
-        if (snapshotVarp && disableCntVarp) {
-            snapshotOkp = new AstEq{flp, new AstVarRef{flp, snapshotVarp, VAccess::READ},
-                                    new AstVarRef{flp, disableCntVarp, VAccess::READ}};
-            snapshotOkp->dtypeSetBit();
-        }
-
-        AstNodeExpr* terminalActivep = nullptr;
-        AstNodeExpr* rejectBasep = nullptr;
-        for (const SvaTransEdge* const tep : edges) {
-            if (tep->toVtxp() != graph.m_matchVertexp) continue;
-            if (tep->m_consumesCycle) continue;
-            const int fi = tep->fromVtxp()->color();
-            if (!stateSig[fi]) continue;
-
-            AstNodeExpr* srcSigp = stateSig[fi]->cloneTreePure(false);
-            srcSigp = andCond(flp, srcSigp, tep->m_condp);
-            if (snapshotOkp) {
-                srcSigp = new AstAnd{flp, srcSigp, snapshotOkp->cloneTreePure(false)};
-                srcSigp->dtypeSetBit();
-            }
-
-            if (tep->fromVtxp()->m_isCounter) {
-                terminalActivep = orExprs(flp, terminalActivep, srcSigp->cloneTreePure(false));
-                AstNodeExpr* const atEndp = new AstEq{
-                    flp, new AstVarRef{flp, counterCountVars[fi], VAccess::READ},
-                    new AstConst{flp, AstConst::WidthedValue{}, 32,
-                                 static_cast<uint32_t>(tep->fromVtxp()->m_counterMax)}};
-                atEndp->dtypeSetBit();
-                AstNodeExpr* const expireContribp = new AstAnd{flp, srcSigp, atEndp};
-                expireContribp->dtypeSetBit();
-                rejectBasep = orExprs(flp, rejectBasep, expireContribp);
-            } else if (tep->fromVtxp()->m_isUnbounded || tep->fromVtxp()->m_isAndCombiner) {
-                // Liveness or SAnd combiner: match only; sub-NFAs own their rejects.
-                terminalActivep = orExprs(flp, terminalActivep, srcSigp);
-            } else {
-                terminalActivep = orExprs(flp, terminalActivep, srcSigp->cloneTreePure(false));
-                rejectBasep = orExprs(flp, rejectBasep, srcSigp);
-            }
-        }
-
-        // If no Links to accept, check stateSig at the last registered node
-        // that connects directly (this handles standalone sequences)
-        if (!terminalActivep) {
-            // Find the highest-numbered registered node
-            for (int i = N - 1; i >= 0; --i) {
-                if (stateVars[i] && stateSig[i]) {
-                    terminalActivep = stateSig[i]->cloneTreePure(false);
-                    break;
-                }
-            }
-        }
-        if (!terminalActivep) { terminalActivep = new AstConst{flp, AstConst::BitFalse{}}; }
-
-        // Phase 3a: required-step rejection.
-        // Fires when source is active but link condition is false.
-        // E.g. `a |-> b ##...`: antecedent fires but b is false -- the attempt never
-        // leaves the start state, so no terminal-based reject can fire.
-        AstNodeExpr* requiredStepRejectp = nullptr;
-        for (const SvaTransEdge* const tep : edges) {
-            if (!tep->m_rejectOnFail) continue;
-            if (tep->m_consumesCycle) continue;
-            const int fi = tep->fromVtxp()->color();
-            if (!stateSig[fi]) continue;
-            if (!tep->m_condp) continue;
-            AstNodeExpr* const srcSigp = stateSig[fi]->cloneTreePure(false);
-            AstNodeExpr* const notCondp = new AstNot{flp, tep->m_condp->cloneTreePure(false)};
-            notCondp->dtypeSetBit();
-            AstNodeExpr* const failp = new AstAnd{flp, srcSigp, notCondp};
-            failp->dtypeSetBit();
-            if (outRequiredStepSrcsp) {
-                outRequiredStepSrcsp->push_back(failp->cloneTreePure(false));
-            }
-            requiredStepRejectp = orExprs(flp, requiredStepRejectp, failp);
-        }
-
-        // Phase 3b: Throughout-drop rejection (IEEE 16.9.9).
-        // fail_i = state_active[i] && !$sampled(AND of throughout exprs).
-        AstNodeExpr* throughoutRejectp = nullptr;
-        for (int i = 0; i < N; ++i) {
-            const auto& conds = vtx[i]->m_throughoutConds;
-            if (conds.empty()) continue;
-            // SAnd combiner stateSig fires only at completion; sub-sequences own their vertices.
-            if (vtx[i]->m_isAndCombiner) continue;
-            AstNodeExpr* stateExprp = nullptr;
-            if (stateVars[i]) {
-                stateExprp = new AstVarRef{flp, stateVars[i], VAccess::READ};
-            } else if (stateSig[i]) {
-                stateExprp = stateSig[i]->cloneTreePure(false);
-            } else {
-                continue;
-            }
-            AstNodeExpr* guardp = nullptr;
-            for (AstNodeExpr* const cp : conds) {
-                AstSampled* const sp = new AstSampled{flp, cp->cloneTreePure(false)};
-                sp->dtypeSetBit();
-                if (!guardp) {
-                    guardp = sp;
-                } else {
-                    guardp = new AstAnd{flp, guardp, sp};
-                    guardp->dtypeSetBit();
-                }
-            }
-            AstNodeExpr* const notGuardp = new AstNot{flp, guardp};
-            notGuardp->dtypeSetBit();
-            AstNodeExpr* const failp = new AstAnd{flp, stateExprp, notGuardp};
-            failp->dtypeSetBit();
-            throughoutRejectp = orExprs(flp, throughoutRejectp, failp);
-        }
-
-        for (int i = 0; i < N; ++i) {
-            if (stateSig[i]) {
-                stateSig[i]->deleteTree();
-                stateSig[i] = nullptr;
-            }
-        }
-        // disable iff applied to throughout-drop and required-step rejects:
-        // either kind of failure during disable is abandoned per IEEE 16.12.
-        if (disableExprp) {
-            if (throughoutRejectp) {
-                AstNodeExpr* const notDisp = new AstNot{flp, disableExprp->cloneTreePure(false)};
-                notDisp->dtypeSetBit();
-                throughoutRejectp = new AstAnd{flp, throughoutRejectp, notDisp};
-                throughoutRejectp->dtypeSetBit();
-            }
-            if (requiredStepRejectp) {
-                AstNodeExpr* const notDisp = new AstNot{flp, disableExprp->cloneTreePure(false)};
-                notDisp->dtypeSetBit();
-                requiredStepRejectp = new AstAnd{flp, requiredStepRejectp, notDisp};
-                requiredStepRejectp->dtypeSetBit();
-            }
-        }
-
-        if (snapshotOkp) {
-            snapshotOkp->deleteTree();
-            snapshotOkp = nullptr;
-        }
-
-        if (disableExprp) {
-            disableExprp->deleteTree();
-            disableExprp = nullptr;
-        }
-
-        return assembleResult(flp, isCover, negated, matchCondp, terminalActivep, rejectBasep,
-                              throughoutRejectp, requiredStepRejectp, outMatchpp);
+        return assembleResult(flp, isCover, negated, matchCondp, sigs.terminalActivep,
+                              sigs.rejectBasep, sigs.throughoutRejectp,
+                              sigs.requiredStepRejectp, outMatchpp);
     }
 };
 
@@ -1378,7 +1381,6 @@ class AssertNfaVisitor final : public VNVisitor {
             for (AstNodeExpr* const tc : srcVtxp->m_throughoutConds) {
                 AstNodeExpr* const tcClone = tc->cloneTreePure(false);
                 condp = condp ? new AstAnd{flp, condp, tcClone} : tcClone;
-                if (condp->width() != 1) condp->dtypeSetBit();
             }
             graph.addLink(srcVtxp, graph.m_matchVertexp, condp);
             srcVtxp->m_isUnbounded = true;
@@ -1614,7 +1616,7 @@ class AssertNfaVisitor final : public VNVisitor {
                         VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
                     }
                 }
-                if (senTreeOwned) senTreep->deleteTree();
+                if (senTreeOwned) VL_DO_DANGLING(pushDeletep(senTreep), senTreep);
                 return;
             }
 
@@ -1624,7 +1626,7 @@ class AssertNfaVisitor final : public VNVisitor {
             if (antResult.finalCondp) {
                 graph.addLink(antResult.termVertexp, trigVtxp,
                               new AstSampled{flp, antResult.finalCondp->cloneTreePure(false)});
-                if (!antResult.finalCondp->backp()) antResult.finalCondp->deleteTree();
+                if (!antResult.finalCondp->backp()) pushDeletep(antResult.finalCondp);
             } else {
                 graph.addLink(antResult.termVertexp, trigVtxp);
             }
@@ -1660,7 +1662,7 @@ class AssertNfaVisitor final : public VNVisitor {
                     VL_DO_DANGLING(pushDeletep(oldPropp), oldPropp);
                 }
             }
-            if (senTreeOwned) senTreep->deleteTree();
+            if (senTreeOwned) VL_DO_DANGLING(pushDeletep(senTreep), senTreep);
             return;
         }
 
@@ -1678,18 +1680,16 @@ class AssertNfaVisitor final : public VNVisitor {
             disableCntVarp->lifetime(VLifetime::STATIC_EXPLICIT);
             m_modp->addStmtsp(disableCntVarp);
 
-            AstNodeExpr* const rdRefp = new AstVarRef{flp, disableCntVarp, VAccess::READ};
-            AstNodeExpr* const wrRefp = new AstVarRef{flp, disableCntVarp, VAccess::WRITE};
             AstNodeExpr* const incrExprp
-                = new AstAdd{flp, rdRefp, new AstConst{flp, AstConst::WidthedValue{}, 32, 1u}};
+                = new AstAdd{flp, new AstVarRef{flp, disableCntVarp, VAccess::READ},
+                             new AstConst{flp, AstConst::WidthedValue{}, 32, 1u}};
             incrExprp->dtypeFrom(disableCntVarp);
-            AstAssign* const incrAssignp = new AstAssign{flp, wrRefp, incrExprp};
-            AstSenItem* const senItemp
-                = new AstSenItem{flp, VEdgeType::ET_POSEDGE, disableExprp->cloneTreePure(false)};
-            AstSenTree* const disSenp = new AstSenTree{flp, senItemp};
-            AstAlways* const disAlwaysp
-                = new AstAlways{flp, VAlwaysKwd::ALWAYS, disSenp, incrAssignp};
-            m_modp->addStmtsp(disAlwaysp);
+            m_modp->addStmtsp(new AstAlways{
+                flp, VAlwaysKwd::ALWAYS,
+                new AstSenTree{flp, new AstSenItem{flp, VEdgeType::ET_POSEDGE,
+                                                    disableExprp->cloneTreePure(false)}},
+                new AstAssign{flp, new AstVarRef{flp, disableCntVarp, VAccess::WRITE},
+                              incrExprp}});
 
             const std::string snapName = m_disableCntNames.get("") + "__snap";
             snapshotVarp = new AstVar{flp, VVarType::MODULETEMP, snapName, u32DTypep};
@@ -1723,10 +1723,10 @@ class AssertNfaVisitor final : public VNVisitor {
         AstSenTree* const perSrcSenTreep
             = (requiredStepSrcs.size() >= 2) ? senTreep->cloneTree(false) : nullptr;
 
-        alwaysTriggerp->deleteTree();
-        if (senTreeOwned) senTreep->deleteTree();
-        if (disableExprUnlinked) disableExprp->deleteTree();
-        if (result.finalCondp && !result.finalCondp->backp()) { result.finalCondp->deleteTree(); }
+        VL_DO_DANGLING(pushDeletep(alwaysTriggerp), alwaysTriggerp);
+        if (senTreeOwned) VL_DO_DANGLING(pushDeletep(senTreep), senTreep);
+        if (disableExprUnlinked) VL_DO_DANGLING(pushDeletep(disableExprp), disableExprp);
+        if (result.finalCondp && !result.finalCondp->backp()) pushDeletep(result.finalCondp);
 
         // Gate pass handler on match to prevent vacuous-pass firings.
         if (needAccept && matchExprp) {
@@ -1741,11 +1741,11 @@ class AssertNfaVisitor final : public VNVisitor {
                     failsp->addHereThisAsNext(
                         new AstIf{flp, matchExprp, passsp->cloneTree(false), nullptr});
                 } else {
-                    matchExprp->deleteTree();
+                    VL_DO_DANGLING(pushDeletep(matchExprp), matchExprp);
                 }
                 VL_DO_DANGLING(pushDeletep(passsp), passsp);
             } else {
-                matchExprp->deleteTree();
+                VL_DO_DANGLING(pushDeletep(matchExprp), matchExprp);
             }
         }
 
@@ -1759,23 +1759,20 @@ class AssertNfaVisitor final : public VNVisitor {
                 AstNodeExpr* const srcp = requiredStepSrcs[i];
                 AstNodeExpr* const condp = new AstAnd{flp, srcp->cloneTreePure(false),
                                                       cumulativeOrp->cloneTreePure(false)};
-                condp->dtypeSetBit();
                 AstNode* const failClonep = failsp->cloneTree(true);
                 AstIf* const ifp = new AstIf{flp, condp, failClonep, nullptr};
                 AstAlways* const alwaysp = new AstAlways{flp, VAlwaysKwd::ALWAYS,
                                                          perSrcSenTreep->cloneTree(false), ifp};
                 m_modp->addStmtsp(alwaysp);
-                AstNodeExpr* const extOrp
+                cumulativeOrp
                     = new AstOr{flp, cumulativeOrp, srcp->cloneTreePure(false)};
-                extOrp->dtypeSetBit();
-                cumulativeOrp = extOrp;
             }
-            for (AstNodeExpr* const srcp : requiredStepSrcs) srcp->deleteTree();
-            cumulativeOrp->deleteTree();
-            perSrcSenTreep->deleteTree();
+            for (AstNodeExpr* const srcp : requiredStepSrcs) pushDeletep(srcp);
+            VL_DO_DANGLING(pushDeletep(cumulativeOrp), cumulativeOrp);
+            VL_DO_DANGLING(pushDeletep(perSrcSenTreep), perSrcSenTreep);
         } else {
-            for (AstNodeExpr* const srcp : requiredStepSrcs) srcp->deleteTree();
-            if (perSrcSenTreep) perSrcSenTreep->deleteTree();
+            for (AstNodeExpr* const srcp : requiredStepSrcs) pushDeletep(srcp);
+            if (perSrcSenTreep) VL_DO_DANGLING(pushDeletep(perSrcSenTreep), perSrcSenTreep);
         }
 
         if (propSpecp) {
