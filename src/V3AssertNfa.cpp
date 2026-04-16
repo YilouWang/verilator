@@ -777,26 +777,21 @@ class SvaNfaLowering final {
             for (int i = 0; i < c.N; ++i) {
                 if (!c.vtx[i]->m_isAndCombiner) continue;
                 if (c.stateSig[i]) continue;
-                const int l
-                    = c.vtx[i]->m_andLhsTermp ? c.vtx[i]->m_andLhsTermp->color() : -1;
-                const int r
-                    = c.vtx[i]->m_andRhsTermp ? c.vtx[i]->m_andRhsTermp->color() : -1;
+                const int l = c.vtx[i]->m_andLhsTermp ? c.vtx[i]->m_andLhsTermp->color() : -1;
+                const int r = c.vtx[i]->m_andRhsTermp ? c.vtx[i]->m_andRhsTermp->color() : -1;
                 if (l < 0 || r < 0) continue;
                 if (!c.stateSig[l] || !c.stateSig[r]) continue;
                 AstNodeExpr* const matchLp
                     = buildMatchNow(c.flp, c.stateSig[l], c.vtx[i]->m_andLhsCondp);
                 AstNodeExpr* const matchRp
                     = buildMatchNow(c.flp, c.stateSig[r], c.vtx[i]->m_andRhsCondp);
-                AstNodeExpr* const doneLOrp
-                    = new AstOr{c.flp, new AstVarRef{c.flp, c.doneLVars[i], VAccess::READ},
-                                matchLp};
-                AstNodeExpr* const doneROrp
-                    = new AstOr{c.flp, new AstVarRef{c.flp, c.doneRVars[i], VAccess::READ},
-                                matchRp};
+                AstNodeExpr* const doneLOrp = new AstOr{
+                    c.flp, new AstVarRef{c.flp, c.doneLVars[i], VAccess::READ}, matchLp};
+                AstNodeExpr* const doneROrp = new AstOr{
+                    c.flp, new AstVarRef{c.flp, c.doneRVars[i], VAccess::READ}, matchRp};
                 AstNodeExpr* const bothp = new AstAnd{c.flp, doneLOrp, doneROrp};
-                AstNodeExpr* const oneNowp
-                    = new AstOr{c.flp, matchLp->cloneTreePure(false),
-                                matchRp->cloneTreePure(false)};
+                AstNodeExpr* const oneNowp = new AstOr{c.flp, matchLp->cloneTreePure(false),
+                                                       matchRp->cloneTreePure(false)};
                 c.stateSig[i] = new AstAnd{c.flp, bothp, oneNowp};
                 changed = true;
             }
@@ -826,10 +821,9 @@ class SvaNfaLowering final {
     }
 
     // Combine terminal/reject signals into final output expression.
-    AstNodeExpr* assembleResult(FileLine* flp, bool isCover, bool negated,
-                                AstNodeExpr* matchCondp, AstNodeExpr* terminalActivep,
-                                AstNodeExpr* rejectBasep, AstNodeExpr* throughoutRejectp,
-                                AstNodeExpr* requiredStepRejectp,
+    AstNodeExpr* assembleResult(FileLine* flp, bool isCover, bool negated, AstNodeExpr* matchCondp,
+                                AstNodeExpr* terminalActivep, AstNodeExpr* rejectBasep,
+                                AstNodeExpr* throughoutRejectp, AstNodeExpr* requiredStepRejectp,
                                 AstNodeExpr** outMatchpp) {
         // Property negation (IEEE 1800-2023 16.12.1 `not`): invert match/reject.
         if (negated) {
@@ -865,15 +859,13 @@ class SvaNfaLowering final {
                     AstNodeExpr* const sampledCondp
                         = new AstSampled{flp, matchCondp->cloneTreePure(false)};
                     sampledCondp->dtypeFrom(matchCondp);
-                    notPMatchp
-                        = new AstAnd{flp, rejectBasep->cloneTreePure(false),
-                                     new AstNot{flp, sampledCondp}};
+                    notPMatchp = new AstAnd{flp, rejectBasep->cloneTreePure(false),
+                                            new AstNot{flp, sampledCondp}};
                 } else if (rejectBasep) {
                     notPMatchp = rejectBasep->cloneTreePure(false);
                 }
                 if (throughoutRejectp)
-                    notPMatchp
-                        = orExprs(flp, notPMatchp, throughoutRejectp->cloneTreePure(false));
+                    notPMatchp = orExprs(flp, notPMatchp, throughoutRejectp->cloneTreePure(false));
                 if (requiredStepRejectp)
                     notPMatchp
                         = orExprs(flp, notPMatchp, requiredStepRejectp->cloneTreePure(false));
@@ -1010,12 +1002,24 @@ public:
         }
 
         // Build lowering context for phase sub-functions.
-        LowerCtx c{flp,          N,          vtx,
-                   edges,        startIdx,   matchIdx,
-                   needsReg,     stateVars,  counterActiveVars,
-                   counterCountVars, doneLVars, doneRVars,
-                   {},           senTreep,   disableExprp,
-                   matchCondp,   disableCntVarp, snapshotVarp,
+        LowerCtx c{flp,
+                   N,
+                   vtx,
+                   edges,
+                   startIdx,
+                   matchIdx,
+                   needsReg,
+                   stateVars,
+                   counterActiveVars,
+                   counterCountVars,
+                   doneLVars,
+                   doneRVars,
+                   {},
+                   senTreep,
+                   disableExprp,
+                   matchCondp,
+                   disableCntVarp,
+                   snapshotVarp,
                    graph};
 
         // Phase 1: Resolve combinational Links via fixed-point propagation.
