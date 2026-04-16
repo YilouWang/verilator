@@ -94,9 +94,7 @@ public:
         return "black";
     }
     // Access per-vertex algorithm data (valid only during lowering phase)
-    SvaVertexData* datap() const {
-        return static_cast<SvaVertexData*>(userp());
-    }
+    SvaVertexData* datap() const { return static_cast<SvaVertexData*>(userp()); }
 };
 
 // NFA transition edge -- clocked (##1) or combinational link (##0)
@@ -110,8 +108,8 @@ public:
     bool m_rejectOnFail = false;
 
     // CONSTRUCTORS
-    SvaTransEdge(V3Graph* graphp, V3GraphVertex* fromp, V3GraphVertex* top,
-                 AstNodeExpr* condp, bool consumesCycle)
+    SvaTransEdge(V3Graph* graphp, V3GraphVertex* fromp, V3GraphVertex* top, AstNodeExpr* condp,
+                 bool consumesCycle)
         : V3GraphEdge{graphp, fromp, top, /*weight=*/1}
         , m_condp{condp}
         , m_consumesCycle{consumesCycle} {}
@@ -122,12 +120,8 @@ public:
     string dotLabel() const override { return m_consumesCycle ? "##1" : "link"; }
     string dotStyle() const override { return m_consumesCycle ? "" : "dashed"; }
     // Typed accessors for NFA vertices
-    SvaStateVertex* fromVtxp() const {
-        return static_cast<SvaStateVertex*>(fromp());
-    }
-    SvaStateVertex* toVtxp() const {
-        return static_cast<SvaStateVertex*>(top());
-    }
+    SvaStateVertex* fromVtxp() const { return static_cast<SvaStateVertex*>(fromp()); }
+    SvaStateVertex* toVtxp() const { return static_cast<SvaStateVertex*>(top()); }
 };
 
 // NFA graph container
@@ -138,9 +132,7 @@ public:
     SvaStateVertex* m_matchVertexp = nullptr;  // Sequence-match terminal vertex
 
     // Create a new state vertex
-    SvaStateVertex* createStateVertex() {
-        return new SvaStateVertex{&m_graph};
-    }
+    SvaStateVertex* createStateVertex() { return new SvaStateVertex{&m_graph}; }
     // Create the match terminal vertex
     SvaStateVertex* createMatchVertex() {
         SvaStateVertex* const vtxp = createStateVertex();
@@ -205,9 +197,7 @@ class SvaNfaBuilder final {
                 guardp = new AstAnd{flp, guardp, clonep};
             }
         }
-        if (baseCondp) {
-            guardp = new AstAnd{flp, baseCondp, guardp};
-        }
+        if (baseCondp) { guardp = new AstAnd{flp, baseCondp, guardp}; }
         return guardp;
     }
 
@@ -286,15 +276,15 @@ class SvaNfaBuilder final {
     }
 
     // AND current throughout stack into every edge/link (IEEE 16.9.9 invariant).
-    SvaTransEdge* guardedLink(SvaStateVertex* fromp, SvaStateVertex* top,
-                              AstNodeExpr* condp, FileLine* flp) {
+    SvaTransEdge* guardedLink(SvaStateVertex* fromp, SvaStateVertex* top, AstNodeExpr* condp,
+                              FileLine* flp) {
         return m_graph.addLink(fromp, top, throughoutCond(condp, flp));
     }
     SvaTransEdge* guardedLink(SvaStateVertex* fromp, SvaStateVertex* top, FileLine* flp) {
         return m_graph.addLink(fromp, top, throughoutCond(nullptr, flp));
     }
-    SvaTransEdge* guardedEdge(SvaStateVertex* fromp, SvaStateVertex* top,
-                              AstNodeExpr* condp, FileLine* flp) {
+    SvaTransEdge* guardedEdge(SvaStateVertex* fromp, SvaStateVertex* top, AstNodeExpr* condp,
+                              FileLine* flp) {
         return m_graph.addClockedEdge(fromp, top, throughoutCond(condp, flp));
     }
     SvaTransEdge* guardedEdge(SvaStateVertex* fromp, SvaStateVertex* top, FileLine* flp) {
@@ -313,7 +303,8 @@ class SvaNfaBuilder final {
 
     // Build NFA for an SExpr. finalCond = RHS (not yet added as a vertex).
     // isTopLevelStep: marks outermost required boolean check as rejectOnFail.
-    BuildResult buildSExpr(AstSExpr* sexprp, SvaStateVertex* entryVtxp, bool isTopLevelStep = false) {
+    BuildResult buildSExpr(AstSExpr* sexprp, SvaStateVertex* entryVtxp,
+                           bool isTopLevelStep = false) {
         AstDelay* const delayp = VN_CAST(sexprp->delayp(), Delay);
         if (!delayp || !delayp->isCycleDelay()) return BuildResult::fail();
 
@@ -327,10 +318,8 @@ class SvaNfaBuilder final {
             if (pre.finalCondp) {
                 SvaStateVertex* const condVtxp = scopedCreateVertex();
                 SvaTransEdge* const edgep = guardedLink(
-                    pre.termVertexp, condVtxp,
-                    sampled(pre.finalCondp->cloneTreePure(false)), flp);
-                if (isTopLevelStep && !pre.termVertexp->m_isUnbounded
-                    && !m_inUnboundedScope) {
+                    pre.termVertexp, condVtxp, sampled(pre.finalCondp->cloneTreePure(false)), flp);
+                if (isTopLevelStep && !pre.termVertexp->m_isUnbounded && !m_inUnboundedScope) {
                     // Do not mark liveness sources: first boolean check is deferred.
                     edgep->m_rejectOnFail = true;
                 }
@@ -468,9 +457,7 @@ class SvaNfaBuilder final {
             SvaStateVertex* const condVtxp = scopedCreateVertex();
             SvaTransEdge* const linkp
                 = guardedLink(currentp, condVtxp, sampled(exprp->cloneTreePure(false)), flp);
-            if (isTopLevelStep && (i == 0 || i == minN - 1)) {
-                linkp->m_rejectOnFail = true;
-            }
+            if (isTopLevelStep && (i == 0 || i == minN - 1)) { linkp->m_rejectOnFail = true; }
             currentp = condVtxp;
         }
 
@@ -487,8 +474,7 @@ class SvaNfaBuilder final {
                 SvaStateVertex* const loopBackVtxp = scopedCreateVertex();
                 guardedEdge(currentp, loopBackVtxp, flp);
                 SvaStateVertex* const reCheckVtxp = scopedCreateVertex();
-                guardedLink(loopBackVtxp, reCheckVtxp,
-                            sampled(exprp->cloneTreePure(false)), flp);
+                guardedLink(loopBackVtxp, reCheckVtxp, sampled(exprp->cloneTreePure(false)), flp);
                 guardedEdge(reCheckVtxp, loopBackVtxp, flp);
                 guardedLink(reCheckVtxp, currentp, flp);
             }
@@ -548,14 +534,14 @@ class SvaNfaBuilder final {
         }
         SvaStateVertex* const mergeVtxp = scopedCreateVertex();
         if (lhs.finalCondp) {
-            guardedLink(lhs.termVertexp, mergeVtxp,
-                        sampled(lhs.finalCondp->cloneTreePure(false)), flp);
+            guardedLink(lhs.termVertexp, mergeVtxp, sampled(lhs.finalCondp->cloneTreePure(false)),
+                        flp);
         } else {
             guardedLink(lhs.termVertexp, mergeVtxp, flp);
         }
         if (rhs.finalCondp) {
-            guardedLink(rhs.termVertexp, mergeVtxp,
-                        sampled(rhs.finalCondp->cloneTreePure(false)), flp);
+            guardedLink(rhs.termVertexp, mergeVtxp, sampled(rhs.finalCondp->cloneTreePure(false)),
+                        flp);
         } else {
             guardedLink(rhs.termVertexp, mergeVtxp, flp);
         }
@@ -622,14 +608,12 @@ class SvaNfaBuilder final {
                 sinkVtxp->m_isRejectSink = true;
                 if (lhs.finalCondp && lhsMultiCycle && !lhs.termVertexp->m_isUnbounded) {
                     SvaTransEdge* const ep = m_graph.addLink(
-                        lhs.termVertexp, sinkVtxp,
-                        sampled(lhs.finalCondp->cloneTreePure(false)));
+                        lhs.termVertexp, sinkVtxp, sampled(lhs.finalCondp->cloneTreePure(false)));
                     ep->m_rejectOnFail = true;
                 }
                 if (rhs.finalCondp && rhsMultiCycle && !rhs.termVertexp->m_isUnbounded) {
                     SvaTransEdge* const ep = m_graph.addLink(
-                        rhs.termVertexp, sinkVtxp,
-                        sampled(rhs.finalCondp->cloneTreePure(false)));
+                        rhs.termVertexp, sinkVtxp, sampled(rhs.finalCondp->cloneTreePure(false)));
                     ep->m_rejectOnFail = true;
                 }
             }
@@ -713,8 +697,7 @@ class SvaNfaLowering final {
     V3UniqueNames m_names{"__Vnfa"};
 
     // Build a match-now expression: stateSig[i] && $sampled(condp)
-    static AstNodeExpr* buildMatchNow(FileLine* flp, AstNodeExpr* stateExprp,
-                                      AstNodeExpr* condp) {
+    static AstNodeExpr* buildMatchNow(FileLine* flp, AstNodeExpr* stateExprp, AstNodeExpr* condp) {
         AstNodeExpr* const statep = stateExprp->cloneTreePure(false);
         if (!condp) return statep;
         AstSampled* const sampp = new AstSampled{flp, condp->cloneTreePure(false)};
@@ -748,9 +731,7 @@ public:
 
         // Number vertices with sequential colors for array indexing.
         int N = 0;
-        for (V3GraphVertex& vtxr : graph.m_graph.vertices()) {
-            vtxr.color(N++);
-        }
+        for (V3GraphVertex& vtxr : graph.m_graph.vertices()) { vtxr.color(N++); }
         // Build vertex lookup array (color → vertex pointer).
         std::vector<SvaStateVertex*> vtx(N, nullptr);
         for (V3GraphVertex& vtxr : graph.m_graph.vertices()) {
@@ -766,8 +747,7 @@ public:
             for (const V3GraphEdge& er : vtx[i]->outEdges()) {
                 const SvaTransEdge& te = static_cast<const SvaTransEdge&>(er);
                 const int toIdx = te.toVtxp()->color();
-                if (te.m_consumesCycle && toIdx != matchIdx
-                    && !te.toVtxp()->m_isRejectSink) {
+                if (te.m_consumesCycle && toIdx != matchIdx && !te.toVtxp()->m_isRejectSink) {
                     needsReg[toIdx] = true;
                 }
             }
@@ -989,10 +969,9 @@ public:
             if (vtx[ci]->m_counterMin == 0) {
                 inWindowp = new AstConst{flp, AstConst::BitTrue{}};
             } else {
-                inWindowp
-                    = new AstGte{flp, new AstVarRef{flp, cntp, VAccess::READ},
-                                 new AstConst{flp, AstConst::WidthedValue{}, 32,
-                                              static_cast<uint32_t>(vtx[ci]->m_counterMin)}};
+                inWindowp = new AstGte{flp, new AstVarRef{flp, cntp, VAccess::READ},
+                                       new AstConst{flp, AstConst::WidthedValue{}, 32,
+                                                    static_cast<uint32_t>(vtx[ci]->m_counterMin)}};
                 inWindowp->dtypeSetBit();
             }
             AstNodeExpr* acceptedNowp = nullptr;
@@ -1058,10 +1037,8 @@ public:
                                    new AstConst{flp, AstConst::BitFalse{}}};
             clearLp->addNext(clearRp);
 
-            AstNodeExpr* const matchLNowp
-                = buildMatchNow(flp, stateSig[l], avp->m_andLhsCondp);
-            AstNodeExpr* const matchRNowp
-                = buildMatchNow(flp, stateSig[r], avp->m_andRhsCondp);
+            AstNodeExpr* const matchLNowp = buildMatchNow(flp, stateSig[l], avp->m_andLhsCondp);
+            AstNodeExpr* const matchRNowp = buildMatchNow(flp, stateSig[r], avp->m_andRhsCondp);
             AstNodeExpr* gateLp = matchLNowp;
             AstNodeExpr* gateRp = matchRNowp;
             if (disableExprp) {
@@ -1117,17 +1094,15 @@ public:
 
             if (tep->fromVtxp()->m_isCounter) {
                 terminalActivep = orExprs(flp, terminalActivep, srcSigp->cloneTreePure(false));
-                AstNodeExpr* const atEndp
-                    = new AstEq{flp, new AstVarRef{flp, counterCountVars[fi], VAccess::READ},
-                                new AstConst{flp, AstConst::WidthedValue{}, 32,
-                                             static_cast<uint32_t>(
-                                                 tep->fromVtxp()->m_counterMax)}};
+                AstNodeExpr* const atEndp = new AstEq{
+                    flp, new AstVarRef{flp, counterCountVars[fi], VAccess::READ},
+                    new AstConst{flp, AstConst::WidthedValue{}, 32,
+                                 static_cast<uint32_t>(tep->fromVtxp()->m_counterMax)}};
                 atEndp->dtypeSetBit();
                 AstNodeExpr* const expireContribp = new AstAnd{flp, srcSigp, atEndp};
                 expireContribp->dtypeSetBit();
                 rejectBasep = orExprs(flp, rejectBasep, expireContribp);
-            } else if (tep->fromVtxp()->m_isUnbounded
-                       || tep->fromVtxp()->m_isAndCombiner) {
+            } else if (tep->fromVtxp()->m_isUnbounded || tep->fromVtxp()->m_isAndCombiner) {
                 // Liveness or SAnd combiner: match only; sub-NFAs own their rejects.
                 terminalActivep = orExprs(flp, terminalActivep, srcSigp);
             } else {
@@ -1371,8 +1346,7 @@ class AssertNfaVisitor final : public VNVisitor {
     std::set<const AstProperty*> m_inliningProps;  // Recursion guard for inlineNamedProperty
 
     // Wire match vertex and mid-window sources for a successful NFA build.
-    static void wireMatchAndMidSources(SvaGraph& graph, const BuildResult& result,
-                                       FileLine* flp) {
+    static void wireMatchAndMidSources(SvaGraph& graph, const BuildResult& result, FileLine* flp) {
         graph.createMatchVertex();
         graph.addLink(result.termVertexp, graph.m_matchVertexp);
         for (SvaStateVertex* srcVtxp : result.midSources) {
@@ -1625,8 +1599,7 @@ class AssertNfaVisitor final : public VNVisitor {
             SvaStateVertex* const trigVtxp = graph.createStateVertex();
             if (antResult.finalCondp) {
                 graph.addLink(antResult.termVertexp, trigVtxp,
-                              new AstSampled{flp,
-                                             antResult.finalCondp->cloneTreePure(false)});
+                              new AstSampled{flp, antResult.finalCondp->cloneTreePure(false)});
                 if (!antResult.finalCondp->backp()) antResult.finalCondp->deleteTree();
             } else {
                 graph.addLink(antResult.termVertexp, trigVtxp);
@@ -1718,8 +1691,7 @@ class AssertNfaVisitor final : public VNVisitor {
 
         AstNodeExpr* const alwaysTriggerp = new AstConst{flp, AstConst::BitTrue{}};
         AstNodeExpr* const outputExprp
-            = m_loweringp->lower(flp, graph, alwaysTriggerp, senTreep, result.finalCondp,
-                                 isCover,
+            = m_loweringp->lower(flp, graph, alwaysTriggerp, senTreep, result.finalCondp, isCover,
                                  disableExprp ? disableExprp->cloneTreePure(false) : nullptr,
                                  negated, needAccept ? &matchExprp : nullptr, disableCntVarp,
                                  snapshotVarp, needPerSrcFail ? &requiredStepSrcs : nullptr);
