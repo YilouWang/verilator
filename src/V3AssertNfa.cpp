@@ -696,6 +696,29 @@ class SvaNfaLowering final {
     AstNodeModule* const m_modp;  // Module to add state vars and always blocks to
     V3UniqueNames m_names{"__Vnfa"};
 
+    // Per-lowering shared context (passed to phase sub-functions)
+    struct LowerCtx final {
+        FileLine* flp;  // Source location for generated AST
+        int N;  // Number of vertices
+        std::vector<SvaStateVertex*> vtx;  // Color-indexed vertex lookup
+        std::vector<const SvaTransEdge*> edges;  // All edges (flat)
+        int startIdx;  // Start vertex color index
+        int matchIdx;  // Match vertex color index (-1 if none)
+        std::vector<bool> needsReg;  // True if vertex has incoming clocked edge
+        std::vector<AstVar*> stateVars;  // Per-vertex NBA state register
+        std::vector<AstVar*> counterActiveVars;  // Counter FSM active flag
+        std::vector<AstVar*> counterCountVars;  // Counter FSM count register
+        std::vector<AstVar*> doneLVars;  // SAnd LHS done-latch
+        std::vector<AstVar*> doneRVars;  // SAnd RHS done-latch
+        std::vector<AstNodeExpr*> stateSig;  // Combinational state signal per vertex
+        AstSenTree* senTreep;  // Clock sensitivity tree
+        AstNodeExpr* disableExprp;  // disable iff expression (may be nullptr)
+        AstNodeExpr* matchCondp;  // Final boolean match condition (may be nullptr)
+        AstVar* disableCntVarp;  // disable counter var (may be nullptr)
+        AstVar* snapshotVarp;  // disable snapshot var (may be nullptr)
+        SvaGraph& graph;  // NFA graph
+    };
+
     // Build a match-now expression: stateSig[i] && $sampled(condp)
     static AstNodeExpr* buildMatchNow(FileLine* flp, AstNodeExpr* stateExprp, AstNodeExpr* condp) {
         AstNodeExpr* const statep = stateExprp->cloneTreePure(false);
@@ -712,6 +735,195 @@ class SvaNfaLowering final {
         if (!ap) return bp;
         if (!bp) return ap;
         return new AstOr{flp, ap, bp};
+    }
+
+    // Phase 3 output signals
+    struct SignalSet final {
+        AstNodeExpr* terminalActivep = nullptr;
+        AstNodeExpr* rejectBasep = nullptr;
+        AstNodeExpr* requiredStepRejectp = nullptr;
+        AstNodeExpr* throughoutRejectp = nullptr;
+    };
+
+    // Phase 1: Resolve combinational Links via fixed-point propagation.
+    void resolveLinks(LowerCtx& c, AstNodeExpr* triggerExprp) {
+        c.stateSig.assign(c.N, nullptr);
+        c.stateSig[c.startIdx] = triggerExprp->cloneTreePure(false);
+        for (int i = 0; i < c.N; ++i) {
+            if (c.stateVars[i]) {
+                c.stateSig[i] = new AstVarRef{c.flp, c.stateVars[i], VAccess::READ};
+            } else if (c.counterActiveVars[i]) {
+                AstVarRef* const activeRefp
+                    = new AstVarRef{c.flp, c.counterActiveVars[i], VAccess::READ};
+                if (c.vtx[i]->m_counterMin == 0) {
+                    c.stateSig[i] = activeRefp;
+                } else {
+                    AstGte* const gtep = new AstGte{
+                        c.flp, new AstVarRef{c.flp, c.counterCountVars[i], VAccess::READ},
+                        new AstConst{c.flp, AstConst::WidthedValue{}, 32,
+                                     static_cast<uint32_t>(c.vtx[i]->m_counterMin)}};
+                    gtep->dtypeSetBit();
+                    c.stateSig[i] = new AstAnd{c.flp, activeRefp, gtep};
+                }
+            }
+        }
+        // Fixed-point propagation along zero-delay (Link) edges.
+        // Worst case: longest chain is N hops; SAnd seeding adds one extra round;
+        // factor-of-2 covers reverse-order dependencies.
+        for (int pass = 0; pass < 2 * c.N + 2; ++pass) {
+            bool changed = false;
+            // Seed SAnd combiners (sub-NFA termVertices may only be available
+            // after a propagation pass).
+            for (int i = 0; i < c.N; ++i) {
+                if (!c.vtx[i]->m_isAndCombiner) continue;
+                if (c.stateSig[i]) continue;
+                const int l
+                    = c.vtx[i]->m_andLhsTermp ? c.vtx[i]->m_andLhsTermp->color() : -1;
+                const int r
+                    = c.vtx[i]->m_andRhsTermp ? c.vtx[i]->m_andRhsTermp->color() : -1;
+                if (l < 0 || r < 0) continue;
+                if (!c.stateSig[l] || !c.stateSig[r]) continue;
+                AstNodeExpr* const matchLp
+                    = buildMatchNow(c.flp, c.stateSig[l], c.vtx[i]->m_andLhsCondp);
+                AstNodeExpr* const matchRp
+                    = buildMatchNow(c.flp, c.stateSig[r], c.vtx[i]->m_andRhsCondp);
+                AstNodeExpr* const doneLOrp
+                    = new AstOr{c.flp, new AstVarRef{c.flp, c.doneLVars[i], VAccess::READ},
+                                matchLp};
+                AstNodeExpr* const doneROrp
+                    = new AstOr{c.flp, new AstVarRef{c.flp, c.doneRVars[i], VAccess::READ},
+                                matchRp};
+                AstNodeExpr* const bothp = new AstAnd{c.flp, doneLOrp, doneROrp};
+                AstNodeExpr* const oneNowp
+                    = new AstOr{c.flp, matchLp->cloneTreePure(false),
+                                matchRp->cloneTreePure(false)};
+                c.stateSig[i] = new AstAnd{c.flp, bothp, oneNowp};
+                changed = true;
+            }
+            // Propagate Link edges
+            for (int fi = 0; fi < c.N; ++fi) {
+                if (!c.stateSig[fi]) continue;
+                for (const V3GraphEdge& er : c.vtx[fi]->outEdges()) {
+                    const SvaTransEdge& te = static_cast<const SvaTransEdge&>(er);
+                    if (te.m_consumesCycle) continue;
+                    const int ti = te.toVtxp()->color();
+                    if (te.toVtxp()->m_isMatch || te.toVtxp()->m_isRejectSink) continue;
+                    AstNodeExpr* const contributionp
+                        = andCond(c.flp, c.stateSig[fi]->cloneTreePure(false), te.m_condp);
+                    if (!c.stateSig[ti]) {
+                        c.stateSig[ti] = contributionp;
+                        changed = true;
+                    } else if (!c.needsReg[ti]) {
+                        c.stateSig[ti] = orExprs(c.flp, c.stateSig[ti], contributionp);
+                        changed = true;
+                    } else {
+                        contributionp->deleteTree();
+                    }
+                }
+            }
+            if (!changed) break;
+        }
+    }
+
+    // Combine terminal/reject signals into final output expression.
+    AstNodeExpr* assembleResult(FileLine* flp, bool isCover, bool negated,
+                                AstNodeExpr* matchCondp, AstNodeExpr* terminalActivep,
+                                AstNodeExpr* rejectBasep, AstNodeExpr* throughoutRejectp,
+                                AstNodeExpr* requiredStepRejectp,
+                                AstNodeExpr** outMatchpp) {
+        // Property negation (IEEE 1800-2023 16.12.1 `not`): invert match/reject.
+        if (negated) {
+            if (isCover) {
+                if (terminalActivep) terminalActivep->deleteTree();
+                AstNodeExpr* negRejectp = nullptr;
+                if (matchCondp && rejectBasep) {
+                    AstNodeExpr* const sampledCondp
+                        = new AstSampled{flp, matchCondp->cloneTreePure(false)};
+                    sampledCondp->dtypeFrom(matchCondp);
+                    AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
+                    notCondp->dtypeSetBit();
+                    negRejectp = new AstAnd{flp, rejectBasep, notCondp};
+                } else if (rejectBasep) {
+                    rejectBasep->deleteTree();
+                }
+                if (throughoutRejectp) negRejectp = orExprs(flp, negRejectp, throughoutRejectp);
+                if (requiredStepRejectp)
+                    negRejectp = orExprs(flp, negRejectp, requiredStepRejectp);
+                return negRejectp ? negRejectp : new AstConst{flp, AstConst::BitFalse{}};
+            }
+            // Negated assert/assume: output = !match.
+            AstNodeExpr* matchp = terminalActivep;
+            if (matchCondp) {
+                AstNodeExpr* const sampledCondp
+                    = new AstSampled{flp, matchCondp->cloneTreePure(false)};
+                sampledCondp->dtypeFrom(matchCondp);
+                matchp = new AstAnd{flp, matchp, sampledCondp};
+            }
+            if (outMatchpp) {
+                AstNodeExpr* notPMatchp = nullptr;
+                if (matchCondp && rejectBasep) {
+                    AstNodeExpr* const sampledCondp
+                        = new AstSampled{flp, matchCondp->cloneTreePure(false)};
+                    sampledCondp->dtypeFrom(matchCondp);
+                    notPMatchp
+                        = new AstAnd{flp, rejectBasep->cloneTreePure(false),
+                                     new AstNot{flp, sampledCondp}};
+                } else if (rejectBasep) {
+                    notPMatchp = rejectBasep->cloneTreePure(false);
+                }
+                if (throughoutRejectp)
+                    notPMatchp
+                        = orExprs(flp, notPMatchp, throughoutRejectp->cloneTreePure(false));
+                if (requiredStepRejectp)
+                    notPMatchp
+                        = orExprs(flp, notPMatchp, requiredStepRejectp->cloneTreePure(false));
+                *outMatchpp = notPMatchp;
+            }
+            if (throughoutRejectp) throughoutRejectp->deleteTree();
+            if (rejectBasep) rejectBasep->deleteTree();
+            if (requiredStepRejectp) requiredStepRejectp->deleteTree();
+            AstNodeExpr* const resultExprp = new AstNot{flp, matchp};
+            resultExprp->dtypeSetBit();
+            return resultExprp;
+        }
+        if (isCover) {
+            if (throughoutRejectp) throughoutRejectp->deleteTree();
+            if (rejectBasep) rejectBasep->deleteTree();
+            if (requiredStepRejectp) requiredStepRejectp->deleteTree();
+            if (matchCondp) {
+                AstNodeExpr* const sampledCondp
+                    = new AstSampled{flp, matchCondp->cloneTreePure(false)};
+                sampledCondp->dtypeFrom(matchCondp);
+                return new AstAnd{flp, terminalActivep, sampledCondp};
+            }
+            return terminalActivep;
+        }
+        // Assert/assume: output = !reject
+        AstNodeExpr* rejectp = nullptr;
+        if (matchCondp && rejectBasep) {
+            AstNodeExpr* const sampledCondp
+                = new AstSampled{flp, matchCondp->cloneTreePure(false)};
+            sampledCondp->dtypeFrom(matchCondp);
+            rejectp = new AstAnd{flp, rejectBasep, new AstNot{flp, sampledCondp}};
+        } else if (rejectBasep) {
+            rejectBasep->deleteTree();
+        }
+        if (outMatchpp) {
+            AstNodeExpr* matchExprp = terminalActivep->cloneTreePure(false);
+            if (matchCondp) {
+                AstNodeExpr* const sp = new AstSampled{flp, matchCondp->cloneTreePure(false)};
+                sp->dtypeSetBit();
+                matchExprp = new AstAnd{flp, matchExprp, sp};
+            }
+            *outMatchpp = matchExprp;
+        }
+        if (terminalActivep) terminalActivep->deleteTree();
+        if (throughoutRejectp) rejectp = orExprs(flp, rejectp, throughoutRejectp);
+        if (requiredStepRejectp) rejectp = orExprs(flp, rejectp, requiredStepRejectp);
+        if (!rejectp) return new AstConst{flp, AstConst::BitTrue{}};
+        AstNodeExpr* const resultExprp = new AstNot{flp, rejectp};
+        resultExprp->dtypeSetBit();
+        return resultExprp;
     }
 
 public:
@@ -732,7 +944,6 @@ public:
         // Number vertices with sequential colors for array indexing.
         int N = 0;
         for (V3GraphVertex& vtxr : graph.m_graph.vertices()) { vtxr.color(N++); }
-        // Build vertex lookup array (color → vertex pointer).
         std::vector<SvaStateVertex*> vtx(N, nullptr);
         for (V3GraphVertex& vtxr : graph.m_graph.vertices()) {
             vtx[vtxr.color()] = static_cast<SvaStateVertex*>(&vtxr);
@@ -798,95 +1009,18 @@ public:
             stateVars[i] = varp;
         }
 
-        // Phase 1: Resolve Links (combinational state_sig)
-        std::vector<AstNodeExpr*> stateSig(N, nullptr);
-        stateSig[startIdx] = triggerExprp->cloneTreePure(false);
-        for (int i = 0; i < N; ++i) {
-            if (stateVars[i]) {
-                stateSig[i] = new AstVarRef{flp, stateVars[i], VAccess::READ};
-            } else if (counterActiveVars[i]) {
-                AstVarRef* const activeRefp
-                    = new AstVarRef{flp, counterActiveVars[i], VAccess::READ};
-                if (vtx[i]->m_counterMin == 0) {
-                    stateSig[i] = activeRefp;
-                } else {
-                    AstGte* const gtep
-                        = new AstGte{flp, new AstVarRef{flp, counterCountVars[i], VAccess::READ},
-                                     new AstConst{flp, AstConst::WidthedValue{}, 32,
-                                                  static_cast<uint32_t>(vtx[i]->m_counterMin)}};
-                    gtep->dtypeSetBit();
-                    AstNodeExpr* const andp = new AstAnd{flp, activeRefp, gtep};
-                    andp->dtypeSetBit();
-                    stateSig[i] = andp;
-                }
-            }
-        }
+        // Build lowering context for phase sub-functions.
+        LowerCtx c{flp,          N,          vtx,
+                   edges,        startIdx,   matchIdx,
+                   needsReg,     stateVars,  counterActiveVars,
+                   counterCountVars, doneLVars, doneRVars,
+                   {},           senTreep,   disableExprp,
+                   matchCondp,   disableCntVarp, snapshotVarp,
+                   graph};
 
-        // Fixed-point propagation along zero-delay (Link) edges.
-        // Worst case: longest chain of Link edges is N hops; SAnd combiner
-        // seeding adds one extra round; factor-of-2 covers reverse-order
-        // dependencies.  Static NFA size is bounded by kChainLimit (256)
-        // plus small per-operator overhead, so this is O(N^2) at compile
-        // time only -- not simulation time.
-        for (int pass = 0; pass < 2 * N + 2; ++pass) {
-            bool changed = false;
-            // Seed SAnd combiners inside the fixed-point (sub-NFA termNodes
-            // may be Link-propagated and only available after a pass).
-            for (int i = 0; i < N; ++i) {
-                if (!vtx[i]->m_isAndCombiner) continue;
-                if (stateSig[i]) continue;
-                const int l = vtx[i]->m_andLhsTermp ? vtx[i]->m_andLhsTermp->color() : -1;
-                const int r = vtx[i]->m_andRhsTermp ? vtx[i]->m_andRhsTermp->color() : -1;
-                if (l < 0 || r < 0) continue;
-                if (!stateSig[l] || !stateSig[r]) continue;
-
-                AstNodeExpr* const matchLNowp
-                    = buildMatchNow(flp, stateSig[l], vtx[i]->m_andLhsCondp);
-                AstNodeExpr* const matchRNowp
-                    = buildMatchNow(flp, stateSig[r], vtx[i]->m_andRhsCondp);
-
-                AstNodeExpr* const doneLRefp = new AstVarRef{flp, doneLVars[i], VAccess::READ};
-                AstNodeExpr* const doneLOrp = new AstOr{flp, doneLRefp, matchLNowp};
-                doneLOrp->dtypeSetBit();
-                AstNodeExpr* const doneRRefp = new AstVarRef{flp, doneRVars[i], VAccess::READ};
-                AstNodeExpr* const doneROrp = new AstOr{flp, doneRRefp, matchRNowp};
-                doneROrp->dtypeSetBit();
-                AstNodeExpr* const bothDonep = new AstAnd{flp, doneLOrp, doneROrp};
-                bothDonep->dtypeSetBit();
-                AstNodeExpr* const oneNowp = new AstOr{flp, matchLNowp->cloneTreePure(false),
-                                                       matchRNowp->cloneTreePure(false)};
-                oneNowp->dtypeSetBit();
-                AstNodeExpr* const matchedp = new AstAnd{flp, bothDonep, oneNowp};
-                matchedp->dtypeSetBit();
-                stateSig[i] = matchedp;
-                changed = true;
-            }
-
-            for (int fi = 0; fi < N; ++fi) {
-                if (!stateSig[fi]) continue;
-                for (const V3GraphEdge& er : vtx[fi]->outEdges()) {
-                    const SvaTransEdge& te = static_cast<const SvaTransEdge&>(er);
-                    if (te.m_consumesCycle) continue;
-                    const int ti = te.toVtxp()->color();
-                    if (te.toVtxp()->m_isMatch) continue;
-                    if (te.toVtxp()->m_isRejectSink) continue;
-
-                    AstNodeExpr* const srcSigp = stateSig[fi]->cloneTreePure(false);
-                    AstNodeExpr* const contributionp = andCond(flp, srcSigp, te.m_condp);
-
-                    if (!stateSig[ti]) {
-                        stateSig[ti] = contributionp;
-                        changed = true;
-                    } else if (!needsReg[ti]) {
-                        stateSig[ti] = orExprs(flp, stateSig[ti], contributionp);
-                        changed = true;
-                    } else {
-                        contributionp->deleteTree();
-                    }
-                }
-            }
-            if (!changed) break;
-        }
+        // Phase 1: Resolve combinational Links via fixed-point propagation.
+        resolveLinks(c, triggerExprp);
+        auto& stateSig = c.stateSig;
 
         // Phase 2: Compute Edge activations -> NBA
         AstNode* bodyp = nullptr;
@@ -1213,122 +1347,8 @@ public:
             disableExprp = nullptr;
         }
 
-        // Property negation (IEEE 1800-2023 16.12.1 `not`): invert accept/reject.
-        if (negated) {
-            if (isCover) {
-                if (terminalActivep) terminalActivep->deleteTree();
-                AstNodeExpr* negRejectp = nullptr;
-                if (matchCondp && rejectBasep) {
-                    AstNodeExpr* const sampledCondp
-                        = new AstSampled{flp, matchCondp->cloneTreePure(false)};
-                    sampledCondp->dtypeFrom(matchCondp);
-                    AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
-                    notCondp->dtypeSetBit();
-                    negRejectp = new AstAnd{flp, rejectBasep, notCondp};
-                    negRejectp->dtypeSetBit();
-                } else if (rejectBasep) {
-                    rejectBasep->deleteTree();
-                }
-                if (throughoutRejectp) {
-                    negRejectp = orExprs(flp, negRejectp, throughoutRejectp);
-                    if (negRejectp) negRejectp->dtypeSetBit();
-                }
-                if (requiredStepRejectp) {
-                    negRejectp = orExprs(flp, negRejectp, requiredStepRejectp);
-                    if (negRejectp) negRejectp->dtypeSetBit();
-                }
-                return negRejectp ? negRejectp : new AstConst{flp, AstConst::BitFalse{}};
-            }
-            // Negated assert/assume: output = !accept.
-            AstNodeExpr* acceptp = terminalActivep;
-            if (matchCondp) {
-                AstNodeExpr* const sampledCondp
-                    = new AstSampled{flp, matchCondp->cloneTreePure(false)};
-                sampledCondp->dtypeFrom(matchCondp);
-                acceptp = new AstAnd{flp, acceptp, sampledCondp};
-                acceptp->dtypeSetBit();
-            }
-            if (outMatchpp) {
-                AstNodeExpr* notPAcceptp = nullptr;
-                if (matchCondp && rejectBasep) {
-                    AstNodeExpr* const sampledCondp
-                        = new AstSampled{flp, matchCondp->cloneTreePure(false)};
-                    sampledCondp->dtypeFrom(matchCondp);
-                    AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
-                    notCondp->dtypeSetBit();
-                    notPAcceptp = new AstAnd{flp, rejectBasep->cloneTreePure(false), notCondp};
-                    notPAcceptp->dtypeSetBit();
-                } else if (rejectBasep) {
-                    notPAcceptp = rejectBasep->cloneTreePure(false);
-                }
-                if (throughoutRejectp)
-                    notPAcceptp
-                        = orExprs(flp, notPAcceptp, throughoutRejectp->cloneTreePure(false));
-                if (requiredStepRejectp)
-                    notPAcceptp
-                        = orExprs(flp, notPAcceptp, requiredStepRejectp->cloneTreePure(false));
-                *outMatchpp = notPAcceptp;
-            }
-            if (throughoutRejectp) throughoutRejectp->deleteTree();
-            if (rejectBasep) rejectBasep->deleteTree();
-            if (requiredStepRejectp) requiredStepRejectp->deleteTree();
-            AstNodeExpr* const resultExprp = new AstNot{flp, acceptp};
-            resultExprp->dtypeSetBit();
-            return resultExprp;
-        }
-
-        if (isCover) {
-            if (throughoutRejectp) throughoutRejectp->deleteTree();
-            if (rejectBasep) rejectBasep->deleteTree();
-            if (requiredStepRejectp) requiredStepRejectp->deleteTree();
-            if (matchCondp) {
-                AstNodeExpr* const sampledCondp
-                    = new AstSampled{flp, matchCondp->cloneTreePure(false)};
-                sampledCondp->dtypeFrom(matchCondp);
-                AstNodeExpr* const acceptp = new AstAnd{flp, terminalActivep, sampledCondp};
-                acceptp->dtypeSetBit();
-                return acceptp;
-            }
-            return terminalActivep;
-        }
-
-        // Assert/assume: output = !reject
-        AstNodeExpr* rejectp = nullptr;
-        if (matchCondp && rejectBasep) {
-            AstNodeExpr* const sampledCondp
-                = new AstSampled{flp, matchCondp->cloneTreePure(false)};
-            sampledCondp->dtypeFrom(matchCondp);
-            AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
-            notCondp->dtypeSetBit();
-            rejectp = new AstAnd{flp, rejectBasep, notCondp};
-            rejectp->dtypeSetBit();
-        } else if (rejectBasep) {
-            rejectBasep->deleteTree();
-        }
-        if (outMatchpp) {
-            AstNodeExpr* acceptExprp = terminalActivep->cloneTreePure(false);
-            if (matchCondp) {
-                AstNodeExpr* const sp = new AstSampled{flp, matchCondp->cloneTreePure(false)};
-                sp->dtypeSetBit();
-                acceptExprp = new AstAnd{flp, acceptExprp, sp};
-                acceptExprp->dtypeSetBit();
-            }
-            *outMatchpp = acceptExprp;
-        }
-        if (terminalActivep) terminalActivep->deleteTree();
-
-        if (throughoutRejectp) {
-            rejectp = orExprs(flp, rejectp, throughoutRejectp);
-            if (rejectp) rejectp->dtypeSetBit();
-        }
-        if (requiredStepRejectp) {
-            rejectp = orExprs(flp, rejectp, requiredStepRejectp);
-            if (rejectp) rejectp->dtypeSetBit();
-        }
-        if (!rejectp) { return new AstConst{flp, AstConst::BitTrue{}}; }
-        AstNodeExpr* const resultExprp = new AstNot{flp, rejectp};
-        resultExprp->dtypeSetBit();
-        return resultExprp;
+        return assembleResult(flp, isCover, negated, matchCondp, terminalActivep, rejectBasep,
+                              throughoutRejectp, requiredStepRejectp, outMatchpp);
     }
 };
 
