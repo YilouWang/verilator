@@ -785,13 +785,13 @@ class SvaNfaLowering final {
         if (bodyp) {
             // Capture disableCnt in Phase-2 NBA before any reactive re-evaluation.
             if (c.snapshotVarp && c.disableCntVarp) {
-                AstAssignDly* const snapAssignp = new AstAssignDly{
-                    c.flp, new AstVarRef{c.flp, c.snapshotVarp, VAccess::WRITE},
-                    new AstVarRef{c.flp, c.disableCntVarp, VAccess::READ}};
+                AstAssignDly* const snapAssignp
+                    = new AstAssignDly{c.flp, new AstVarRef{c.flp, c.snapshotVarp, VAccess::WRITE},
+                                       new AstVarRef{c.flp, c.disableCntVarp, VAccess::READ}};
                 bodyp->addNext(snapAssignp);
             }
-            AstAlways* const alwaysp = new AstAlways{c.flp, VAlwaysKwd::ALWAYS,
-                                                      c.senTreep->cloneTree(false), bodyp};
+            AstAlways* const alwaysp
+                = new AstAlways{c.flp, VAlwaysKwd::ALWAYS, c.senTreep->cloneTree(false), bodyp};
             m_modp->addStmtsp(alwaysp);
         }
 
@@ -868,12 +868,11 @@ class SvaNfaLowering final {
                                    new AstConst{c.flp, AstConst::WidthedValue{}, 32, 0u}};
             setActivep->addNext(resetCountp);
             AstIf* const startIfp = new AstIf{c.flp, incomingp, setActivep, nullptr};
-            AstIf* const topIfp = new AstIf{c.flp,
-                                             new AstVarRef{c.flp, activep, VAccess::READ},
-                                             doneIfp, startIfp};
+            AstIf* const topIfp = new AstIf{c.flp, new AstVarRef{c.flp, activep, VAccess::READ},
+                                            doneIfp, startIfp};
 
-            m_modp->addStmtsp(new AstAlways{c.flp, VAlwaysKwd::ALWAYS,
-                                             c.senTreep->cloneTree(false), topIfp});
+            m_modp->addStmtsp(
+                new AstAlways{c.flp, VAlwaysKwd::ALWAYS, c.senTreep->cloneTree(false), topIfp});
         }
 
         // Phase 2c: SAnd combiner done-latch always block.
@@ -922,22 +921,20 @@ class SvaNfaLowering final {
 
             AstIf* const topp
                 = new AstIf{c.flp, c.stateSig[ai]->cloneTreePure(false), clearLp, setLIfp};
-            m_modp->addStmtsp(new AstAlways{c.flp, VAlwaysKwd::ALWAYS,
-                                             c.senTreep->cloneTree(false), topp});
+            m_modp->addStmtsp(
+                new AstAlways{c.flp, VAlwaysKwd::ALWAYS, c.senTreep->cloneTree(false), topp});
         }
     }
 
     // Phase 3/3a/3b: Compute terminal match/reject signals, required-step reject,
     // throughout-drop reject; clean up intermediate state signals.
-    SignalSet computeSignals(LowerCtx& c,
-                             std::vector<AstNodeExpr*>* outRequiredStepSrcsp) {
+    SignalSet computeSignals(LowerCtx& c, std::vector<AstNodeExpr*>* outRequiredStepSrcsp) {
         SignalSet sigs;
 
         // Snapshot comparison expression for disable-iff counter.
         AstNodeExpr* snapshotOkp = nullptr;
         if (c.snapshotVarp && c.disableCntVarp) {
-            snapshotOkp = new AstEq{c.flp,
-                                    new AstVarRef{c.flp, c.snapshotVarp, VAccess::READ},
+            snapshotOkp = new AstEq{c.flp, new AstVarRef{c.flp, c.snapshotVarp, VAccess::READ},
                                     new AstVarRef{c.flp, c.disableCntVarp, VAccess::READ}};
             snapshotOkp->dtypeSetBit();
         }
@@ -1354,8 +1351,8 @@ public:
         const SignalSet sigs = computeSignals(c, outRequiredStepSrcsp);
 
         return assembleResult(flp, isCover, negated, matchCondp, sigs.terminalActivep,
-                              sigs.rejectBasep, sigs.throughoutRejectp,
-                              sigs.requiredStepRejectp, outMatchpp);
+                              sigs.rejectBasep, sigs.throughoutRejectp, sigs.requiredStepRejectp,
+                              outMatchpp);
     }
 };
 
@@ -1687,7 +1684,7 @@ class AssertNfaVisitor final : public VNVisitor {
             m_modp->addStmtsp(new AstAlways{
                 flp, VAlwaysKwd::ALWAYS,
                 new AstSenTree{flp, new AstSenItem{flp, VEdgeType::ET_POSEDGE,
-                                                    disableExprp->cloneTreePure(false)}},
+                                                   disableExprp->cloneTreePure(false)}},
                 new AstAssign{flp, new AstVarRef{flp, disableCntVarp, VAccess::WRITE},
                               incrExprp}});
 
@@ -1764,8 +1761,7 @@ class AssertNfaVisitor final : public VNVisitor {
                 AstAlways* const alwaysp = new AstAlways{flp, VAlwaysKwd::ALWAYS,
                                                          perSrcSenTreep->cloneTree(false), ifp};
                 m_modp->addStmtsp(alwaysp);
-                cumulativeOrp
-                    = new AstOr{flp, cumulativeOrp, srcp->cloneTreePure(false)};
+                cumulativeOrp = new AstOr{flp, cumulativeOrp, srcp->cloneTreePure(false)};
             }
             for (AstNodeExpr* const srcp : requiredStepSrcs) pushDeletep(srcp);
             VL_DO_DANGLING(pushDeletep(cumulativeOrp), cumulativeOrp);
