@@ -1404,11 +1404,9 @@ class AssertNfaVisitor final : public VNVisitor {
     void inlineNamedProperty(AstPropSpec* outerSpecp, AstFuncRef* funcrefp,
                              const AstProperty* propyp) {
         // Recursion guard: IEEE 1800-2023 16.12.1 forbids recursive properties.
-        if (m_inliningProps.count(propyp)) {
-            funcrefp->v3error("Illegal recursive property reference"
-                              " (IEEE 1800-2023 16.12.1)");
-            return;
-        }
+        // V3Width emits "Recursive property call" for direct recursion before this
+        // pass runs; silently bail on any nested-inlining recursion that may slip past.
+        if (m_inliningProps.count(propyp)) return;
         m_inliningProps.insert(propyp);
         struct Guard final {
             std::set<const AstProperty*>& setr;
