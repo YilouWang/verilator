@@ -67,6 +67,10 @@ module t (
   assert property (@(posedge clk) disable iff (cyc < 2)
       (a or 1'b0) |-> a);
 
+  // Logical '||' (AstLogOr) in sequence: same semantics as 'or' for booleans
+  assert property (@(posedge clk) disable iff (cyc < 2)
+      (a || b) |-> (a | b));
+
   // =========================================================================
   // Multi-cycle sequence and (IEEE 1800-2023 16.9.5)
   // CRC-driven: antecedent gates when sequence starts, consequent guaranteed
@@ -100,5 +104,23 @@ module t (
   // Sequence 'or': standalone (constant, always passes)
   assert property (@(posedge clk)
       (1'b1 ##1 1'b1) or (1'b1 ##2 1'b1));
+
+  // =========================================================================
+  // SAnd edge cases (NFA builder coverage)
+  // =========================================================================
+
+  // SAnd where only one side has finalCondp: a[*2] has no finalCond (consumed
+  // by ConsRep); b ##1 c has finalCond=c. Exercises single-cond path in
+  // buildAndCombiner.
+  cover property (@(posedge clk) (a[*2]) and (b ##1 c));
+
+  // SAnd where both sides lack finalCondp (both end with registered state).
+  // Exercises buildMatchNow(!condp) path.
+  cover property (@(posedge clk) (a[*2]) and (b[*2]));
+
+  // =========================================================================
+  // Negated cover property (NFA assembleResult negated+cover branches)
+  // =========================================================================
+  cover property (@(posedge clk) not (a ##1 b));
 
 endmodule

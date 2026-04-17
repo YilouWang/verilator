@@ -87,12 +87,12 @@ public:
     }
     // METHODS
     string name() const override { return "s" + cvtToStr(color()); }
-    string dotColor() const override {
+    string dotColor() const override {  // LCOV_EXCL_START -- Graphviz dump only
         if (m_isMatch) return "red";
         if (m_isCounter) return "blue";
         if (m_isAndCombiner) return "purple";
         return "black";
-    }
+    }  // LCOV_EXCL_STOP
     // Access per-vertex algorithm data (valid only during lowering phase)
     SvaVertexData* datap() const { return static_cast<SvaVertexData*>(userp()); }
 };
@@ -117,8 +117,10 @@ public:
         if (m_condp) m_condp->deleteTree();
     }
     // METHODS
+    // LCOV_EXCL_START -- Graphviz dump only
     string dotLabel() const override { return m_consumesCycle ? "##1" : "link"; }
     string dotStyle() const override { return m_consumesCycle ? "" : "dashed"; }
+    // LCOV_EXCL_STOP
     // Typed accessors for NFA vertices
     SvaStateVertex* fromVtxp() const { return static_cast<SvaStateVertex*>(fromp()); }
     SvaStateVertex* toVtxp() const { return static_cast<SvaStateVertex*>(top()); }
@@ -223,7 +225,6 @@ class SvaNfaBuilder final {
     //  - ConsRep / SGotoRep / SAnd / SOr     -> defer (rare in intersect)
     //  - SIntersect nested in SIntersect     -> defer
     static int fixedLength(AstNodeExpr* nodep) {
-        if (!nodep) return 0;
         if (AstSExpr* const sexprp = VN_CAST(nodep, SExpr)) {
             AstDelay* const delayp = VN_CAST(sexprp->delayp(), Delay);
             if (!delayp || !delayp->isCycleDelay()) return -1;
@@ -438,7 +439,7 @@ class SvaNfaBuilder final {
             return BuildResult::failWithError();
         }
         const int minN = getConstInt(repp->countp());
-        if (minN < 0) return BuildResult::fail();
+        UASSERT_OBJ(minN >= 0, repp, "ConsRep count must be non-negative (V3Width invariant)");
         // Bail on large exact repetitions (no counter FSM for ConsRep yet).
         constexpr int kConsRepLimit = 256;
         if (minN > kConsRepLimit && !repp->unbounded() && !repp->maxCountp()) {
@@ -482,7 +483,8 @@ class SvaNfaBuilder final {
             m_inUnboundedScope = true;
         } else if (repp->maxCountp()) {
             const int maxN = getConstInt(repp->maxCountp());
-            if (maxN < minN) return BuildResult::fail();
+            UASSERT_OBJ(maxN >= minN, repp,
+                        "ConsRep range max < min (V3Width invariant)");
             SvaStateVertex* const mergeVtxp = scopedCreateVertex();
             guardedLink(currentp, mergeVtxp, flp);
             for (int i = minN; i < maxN; ++i) {
@@ -730,9 +732,9 @@ class SvaNfaLowering final {
         if (!condp) return exprp;
         return new AstAnd{flp, exprp, condp->cloneTreePure(false)};
     }
+    // bp is always non-null; only ap can be null (serving as accumulator).
     static AstNodeExpr* orExprs(FileLine* flp, AstNodeExpr* ap, AstNodeExpr* bp) {
         if (!ap) return bp;
-        if (!bp) return ap;
         return new AstOr{flp, ap, bp};
     }
 
@@ -985,9 +987,9 @@ class SvaNfaLowering final {
         }
 
         // Phase 3a: required-step rejection.
+        // Builder only sets m_rejectOnFail on non-clocked Links, so no need to filter.
         for (const SvaTransEdge* const tep : c.edges) {
             if (!tep->m_rejectOnFail) continue;
-            if (tep->m_consumesCycle) continue;
             const int fi = tep->fromVtxp()->color();
             if (!c.stateSig[fi]) continue;
             if (!tep->m_condp) continue;
@@ -1566,7 +1568,7 @@ class AssertNfaVisitor final : public VNVisitor {
         if (!hasMultiCycleExpr(propp)) return;
 
         const PropertyParts parts = decomposeProperty(propp);
-        if (!parts.seqExprp) return;
+        UASSERT_OBJ(parts.seqExprp, propp, "Property body must be an expression");
 
         // Unwrap `not` (IEEE 1800-2023 16.12.1); odd count -> negated semantics.
         AstNodeExpr* seqBodyp = parts.seqExprp;
@@ -1579,15 +1581,13 @@ class AssertNfaVisitor final : public VNVisitor {
         AstSenTree* senTreep = assertp->sentreep();
         bool senTreeOwned = false;  // True if we created senTreep locally
         AstPropSpec* const propSpecp = VN_CAST(assertp->propp(), PropSpec);
-        AstNodeExpr* disableExprp = nullptr;
-        if (propSpecp) {
-            if (!senTreep && propSpecp->sensesp()) {
-                senTreep
-                    = new AstSenTree{propSpecp->fileline(), propSpecp->sensesp()->cloneTree(true)};
-                senTreeOwned = true;
-            }
-            disableExprp = propSpecp->disablep();
+        UASSERT_OBJ(propSpecp, assertp, "Concurrent assertion must have PropSpec");
+        if (!senTreep && propSpecp->sensesp()) {
+            senTreep = new AstSenTree{propSpecp->fileline(),
+                                      propSpecp->sensesp()->cloneTree(true)};
+            senTreeOwned = true;
         }
+        AstNodeExpr* disableExprp = propSpecp->disablep();
         if (!senTreep) return;
 
         FileLine* const flp = assertp->fileline();
@@ -1606,11 +1606,9 @@ class AssertNfaVisitor final : public VNVisitor {
                 // Fall through to V3AssertPre for unsupported constructs.
                 // Only replace with BitFalse on real semantic errors.
                 if (antResult.errorEmitted) {
-                    if (propSpecp) {
-                        AstNode* const innerPropp = propSpecp->propp();
-                        innerPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
-                        VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
-                    }
+                    AstNode* const innerPropp = propSpecp->propp();
+                    innerPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
+                    VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
                 }
                 if (senTreeOwned) VL_DO_DANGLING(pushDeletep(senTreep), senTreep);
                 return;
@@ -1648,15 +1646,9 @@ class AssertNfaVisitor final : public VNVisitor {
             // Fall through to V3AssertPre for unsupported constructs.
             // Only replace with BitFalse on real semantic errors.
             if (result.errorEmitted) {
-                if (propSpecp) {
-                    AstNode* const innerPropp = propSpecp->propp();
-                    innerPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
-                    VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
-                } else {
-                    AstNode* const oldPropp = assertp->propp();
-                    oldPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
-                    VL_DO_DANGLING(pushDeletep(oldPropp), oldPropp);
-                }
+                AstNode* const innerPropp = propSpecp->propp();
+                innerPropp->replaceWith(new AstConst{flp, AstConst::BitFalse{}});
+                VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
             }
             if (senTreeOwned) VL_DO_DANGLING(pushDeletep(senTreep), senTreep);
             return;
@@ -1747,8 +1739,9 @@ class AssertNfaVisitor final : public VNVisitor {
 
         // Extra fail-handler fires for simultaneous required-step failures
         // (IEEE 1800-2023: fail handler fires once per failing thread).
-        if (requiredStepSrcs.size() >= 2 && assertWithFailp && assertWithFailp->failsp()
-            && perSrcSenTreep) {
+        // perSrcSenTreep is set only when requiredStepSrcs.size() >= 2, and
+        // requiredStepSrcs is populated only when assertWithFailp->failsp() is non-null.
+        if (perSrcSenTreep) {
             AstNode* const failsp = assertWithFailp->failsp();
             AstNodeExpr* cumulativeOrp = requiredStepSrcs[0]->cloneTreePure(false);
             for (size_t i = 1; i < requiredStepSrcs.size(); ++i) {
@@ -1762,23 +1755,14 @@ class AssertNfaVisitor final : public VNVisitor {
                 m_modp->addStmtsp(alwaysp);
                 cumulativeOrp = new AstOr{flp, cumulativeOrp, srcp->cloneTreePure(false)};
             }
-            for (AstNodeExpr* const srcp : requiredStepSrcs) pushDeletep(srcp);
             VL_DO_DANGLING(pushDeletep(cumulativeOrp), cumulativeOrp);
             VL_DO_DANGLING(pushDeletep(perSrcSenTreep), perSrcSenTreep);
-        } else {
-            for (AstNodeExpr* const srcp : requiredStepSrcs) pushDeletep(srcp);
-            if (perSrcSenTreep) VL_DO_DANGLING(pushDeletep(perSrcSenTreep), perSrcSenTreep);
         }
+        for (AstNodeExpr* const srcp : requiredStepSrcs) pushDeletep(srcp);
 
-        if (propSpecp) {
-            AstNode* const innerPropp = propSpecp->propp();
-            innerPropp->replaceWith(outputExprp);
-            VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
-        } else {
-            AstNode* const oldPropp = assertp->propp();
-            oldPropp->replaceWith(outputExprp);
-            VL_DO_DANGLING(pushDeletep(oldPropp), oldPropp);
-        }
+        AstNode* const innerPropp = propSpecp->propp();
+        innerPropp->replaceWith(outputExprp);
+        VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
 
         UINFO(4, "NFA converted assertion at " << flp << endl);
     }

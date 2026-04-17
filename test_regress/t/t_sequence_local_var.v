@@ -63,6 +63,16 @@ module t (
   assert property (p_nonoverlap_sideeffect)
   else nonoverlap_fail++;
 
+  // --- Scenario 6: local variable with initializer ---
+  // V3LinkParse wraps the init into AstInitialAutomaticStmt (property locals
+  // are automatic by default). Exercises the InitialAutomaticStmt branch of
+  // the property-body stepping loop in V3AssertNfa::inlineNamedProperty.
+  property p_init_local;
+    int x = 0;
+    @(posedge clk) valid ##1 (cyc > x);
+  endproperty
+  cover property (p_init_local);
+
   always @(posedge clk) begin
     cyc <= cyc + 1;
     counter_x <= counter_x + 1;

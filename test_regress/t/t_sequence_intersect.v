@@ -79,4 +79,9 @@ module t (
   assert property (@(posedge clk)
       (1'b1 ##1 1'b1) intersect (1'b1 ##1 1'b1));
 
+  // Intersect with `throughout` on one side: exercises fixedLength's
+  // SThroughout branch (recurses into rhs to compute the length).
+  cover property (@(posedge clk)
+      (a throughout (b ##1 c)) intersect (a ##1 c));
+
 endmodule

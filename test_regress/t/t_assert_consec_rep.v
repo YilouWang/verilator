@@ -79,6 +79,11 @@ module t (
   assert property (@(posedge clk) a [*] ##1 b)
   else count_fail11 <= count_fail11 + 1;
 
+  // Counter FSM with M>0: range > kChainLimit (256) forces counter vertex
+  // creation; min>0 exercises the Gte/active gating path in resolveLinks and
+  // emitNbaLogic. Cover-only so count_fail values above are undisturbed.
+  cover property (@(posedge clk) ##[10:300] b);
+
   always @(posedge clk) begin
 `ifdef TEST_VERBOSE
     $write("[%0t] cyc==%0d crc=%x a=%b b=%b c=%b d=%b\n", $time, cyc, crc, a, b, c, d);

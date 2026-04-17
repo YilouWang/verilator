@@ -65,6 +65,15 @@ module t (
       a |-> (a throughout (b throughout (b ##1 c))))
     else count_fail6 <= count_fail6 + 1;
 
+  // Throughout with range-delay, pure-boolean RHS: midSource vertices inherit
+  // the throughout guard. Exercises the throughoutCond clone-and-AND path in
+  // wireMatchAndMidSources. Cover-only (behavior above unchanged).
+  cover property (@(posedge clk) a throughout (b[*1:3] ##1 c));
+
+  // Cover-with-throughout: isCover path deletes the reject signals generated
+  // by the throughout-drop check.
+  cover property (@(posedge clk) a throughout (b ##1 c));
+
   always_ff @(posedge clk) begin
 `ifdef TEST_VERBOSE
     $write("[%0t] cyc==%0d crc=%x cond=%b a=%b b=%b c=%b\n",
