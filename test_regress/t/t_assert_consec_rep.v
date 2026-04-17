@@ -14,9 +14,6 @@ module t (
     input clk
 );
 
-  // Many small parallel assertions; thread scheduler can't effectively split.
-  // verilator lint_off UNOPTTHREADS
-
   int cyc;
   reg [63:0] crc;
 
