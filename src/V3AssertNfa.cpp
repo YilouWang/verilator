@@ -483,8 +483,7 @@ class SvaNfaBuilder final {
             m_inUnboundedScope = true;
         } else if (repp->maxCountp()) {
             const int maxN = getConstInt(repp->maxCountp());
-            UASSERT_OBJ(maxN >= minN, repp,
-                        "ConsRep range max < min (V3Width invariant)");
+            UASSERT_OBJ(maxN >= minN, repp, "ConsRep range max < min (V3Width invariant)");
             SvaStateVertex* const mergeVtxp = scopedCreateVertex();
             guardedLink(currentp, mergeVtxp, flp);
             for (int i = minN; i < maxN; ++i) {
@@ -1583,8 +1582,8 @@ class AssertNfaVisitor final : public VNVisitor {
         AstPropSpec* const propSpecp = VN_CAST(assertp->propp(), PropSpec);
         UASSERT_OBJ(propSpecp, assertp, "Concurrent assertion must have PropSpec");
         if (!senTreep && propSpecp->sensesp()) {
-            senTreep = new AstSenTree{propSpecp->fileline(),
-                                      propSpecp->sensesp()->cloneTree(true)};
+            senTreep
+                = new AstSenTree{propSpecp->fileline(), propSpecp->sensesp()->cloneTree(true)};
             senTreeOwned = true;
         }
         AstNodeExpr* disableExprp = propSpecp->disablep();
