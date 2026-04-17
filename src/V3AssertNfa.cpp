@@ -806,7 +806,8 @@ class SvaNfaLowering final {
 
             AstNodeExpr* incomingp = nullptr;
             for (const SvaTransEdge* const tep : c.edges) {
-                if (tep->toVtxp()->color() != ci) continue;
+                const int toIdx = tep->toVtxp()->color();
+                if (toIdx != ci) continue;
                 if (!tep->m_consumesCycle) continue;
                 const int fi = tep->fromVtxp()->color();
                 if (!c.stateSig[fi]) continue;
