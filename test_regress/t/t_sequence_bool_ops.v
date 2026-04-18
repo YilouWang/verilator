@@ -105,6 +105,13 @@ module t (
   assert property (@(posedge clk)
       (1'b1 ##1 1'b1) or (1'b1 ##2 1'b1));
 
+  // Sequence 'or' where both branches end in registered state (no finalCondp).
+  // Exercises guardedLink(termVertexp,...) in buildOrCombiner for both sides.
+  cover property (@(posedge clk) (a[*2]) or (b[*2]));
+
+  // Sequence 'and' with unbounded range on one side -- marks combiner unbounded.
+  cover property (@(posedge clk) (a ##[1:$] b) and (c ##1 d));
+
   // =========================================================================
   // SAnd edge cases (NFA builder coverage)
   // =========================================================================
@@ -133,10 +140,30 @@ module t (
   // Shape C: throughout in the seq -> throughoutRejectp non-null.
   cover property (@(posedge clk) not (a throughout (b ##1 c)));
 
+  // Shape D: throughout with state-ending RHS (no finalCondp) -> matchCondp null,
+  // throughoutRejectp non-null. Exercises the `if (throughoutRejectp) notPMatchp =
+  // orExprs(...)` branch in assembleResult.
+  cover property (@(posedge clk) not (a throughout (b[*2])));
+
   // Assert variants for the negated-assert code path (needAccept branches).
   assert property (@(posedge clk) not (a ##1 (b[*2])))
     else $display("negated multi-cycle fail");
   assert property (@(posedge clk) not (a throughout (b ##1 c)))
     else $display("negated throughout fail");
+
+  // Negated assert with an explicit pass-action block -- exercises the
+  // `VL_DO_DANGLING(pushDeletep(passsp), passsp)` branch in the needAccept path.
+  assert property (@(posedge clk) not (a ##1 b))
+    $display("negated with pass action");
+
+  // Negated assert ending in state machine (matchCondp null, rejectBasep only):
+  // exercises the `else if (rejectBasep)` branch of notPMatchp assembly.
+  assert property (@(posedge clk) not (a ##1 (b[*2])))
+    $display("negated state-end with pass");
+
+  // Negated assert throughout with state-ending RHS (matchCondp null,
+  // throughoutRejectp non-null): exercises the `if (throughoutRejectp)` branch.
+  assert property (@(posedge clk) not (a throughout (b[*2])))
+    else $display("negated throughout state-end");
 
 endmodule

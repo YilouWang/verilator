@@ -86,13 +86,15 @@ public:
         if (m_andRhsCondp) m_andRhsCondp->deleteTree();
     }
     // METHODS
-    string name() const override { return "s" + cvtToStr(color()); }
-    string dotColor() const override {  // LCOV_EXCL_START -- Graphviz dump only
+    string name() const override { return "s" + cvtToStr(color()); }  // LCOV_EXCL_LINE
+    // LCOV_EXCL_START -- Graphviz dump only
+    string dotColor() const override {
         if (m_isMatch) return "red";
         if (m_isCounter) return "blue";
         if (m_isAndCombiner) return "purple";
         return "black";
-    }  // LCOV_EXCL_STOP
+    }
+    // LCOV_EXCL_STOP
     // Access per-vertex algorithm data (valid only during lowering phase)
     SvaVertexData* datap() const { return static_cast<SvaVertexData*>(userp()); }
 };
@@ -251,11 +253,15 @@ class SvaNfaBuilder final {
         if (AstSThroughout* const throughp = VN_CAST(nodep, SThroughout)) {
             return fixedLength(throughp->rhsp());
         }
+        // LCOV_EXCL_START -- defensive: V3AssertPre rejects composite SVA ops
+        // (SAnd/SOr/SIntersect/SConsRep/SGotoRep) nested in an intersect arm
+        // before fixedLength runs (clock-context resolution fails). Kept as a
+        // guard in case future parser relaxations permit it.
         if (VN_IS(nodep, SConsRep) || VN_IS(nodep, SGotoRep) || VN_IS(nodep, SAnd)
             || VN_IS(nodep, SOr) || VN_IS(nodep, SIntersect)) {
-            // Conservatively variable -- can be tightened in a follow-up.
             return -1;
         }
+        // LCOV_EXCL_STOP
         // Plain boolean expression (no SVA constructs) -- 0 cycles.
         return 0;
     }
@@ -835,8 +841,8 @@ class SvaNfaLowering final {
                     = new AstSampled{c.flp, c.matchCondp->cloneTreePure(false)};
                 sampp->dtypeSetBit();
                 acceptedNowp = new AstAnd{c.flp, inWindowp, sampp};
-            } else {
-                acceptedNowp = inWindowp;
+            } else {  // LCOV_EXCL_LINE -- no counter-FSM caller leaves matchCondp null
+                acceptedNowp = inWindowp;  // LCOV_EXCL_LINE
             }
 
             AstNodeExpr* const counterAtEndp
@@ -1000,10 +1006,10 @@ class SvaNfaLowering final {
             AstNodeExpr* stateExprp = nullptr;
             if (c.stateVars[i]) {
                 stateExprp = new AstVarRef{c.flp, c.stateVars[i], VAccess::READ};
-            } else if (c.stateSig[i]) {
-                stateExprp = c.stateSig[i]->cloneTreePure(false);
             } else {
-                continue;
+                UASSERT_OBJ(c.stateSig[i], c.vtx[i],
+                            "Throughout-conds vertex missing state representation");
+                stateExprp = c.stateSig[i]->cloneTreePure(false);
             }
             AstNodeExpr* guardp = nullptr;
             for (AstNodeExpr* const cp : conds) {
@@ -1431,7 +1437,7 @@ class AssertNfaVisitor final : public VNVisitor {
             }
             const auto localIt = localVarMap.find(refp->varp());
             if (localIt != localVarMap.end()) refp->varp(localIt->second);
-        });
+        });  // LCOV_EXCL_LINE -- gcov attributes lambda's implicit return to `})`
 
         for (const auto& tconnect : tconnects) {
             pushDeletep(tconnect.second->exprp()->unlinkFrBack());

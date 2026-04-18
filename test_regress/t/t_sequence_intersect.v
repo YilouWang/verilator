@@ -84,4 +84,9 @@ module t (
   cover property (@(posedge clk)
       (a throughout (b ##1 c)) intersect (a ##1 c));
 
+  // Intersect with equal-bound range delay (##[N:N]): exercises fixedLength's
+  // isRangeDelay() branch where minD == maxD (else returns -1).
+  cover property (@(posedge clk)
+      (a ##[2:2] b) intersect (c ##2 d));
+
 endmodule
