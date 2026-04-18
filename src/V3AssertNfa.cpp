@@ -815,8 +815,7 @@ class SvaNfaLowering final {
                 const int toIdx = tep->toVtxp()->color();
                 if (toIdx != ci) continue;
                 const int fi = tep->fromVtxp()->color();
-                UASSERT_OBJ(c.stateSig[fi], c.vtx[fi],
-                            "Clocked edge source missing stateSig");
+                UASSERT_OBJ(c.stateSig[fi], c.vtx[fi], "Clocked edge source missing stateSig");
                 AstNodeExpr* contribp = c.stateSig[fi]->cloneTreePure(false);
                 contribp = andCond(c.flp, contribp, tep->m_condp);
                 if (c.disableExprp) {
@@ -827,8 +826,7 @@ class SvaNfaLowering final {
                 }
                 incomingp = orExprs(c.flp, incomingp, contribp);
             }
-            UASSERT_OBJ(incomingp, c.vtx[ci],
-                        "Counter vertex has no incoming contribution");
+            UASSERT_OBJ(incomingp, c.vtx[ci], "Counter vertex has no incoming contribution");
 
             // Builder always sets m_counterMin == 0 (pre-chain handles the M
             // cycles); the "min > 0" path would be dead.
@@ -946,8 +944,7 @@ class SvaNfaLowering final {
         for (const SvaTransEdge* const tep : c.edges) {
             if (tep->toVtxp() != c.graph.m_matchVertexp) continue;
             const int fi = tep->fromVtxp()->color();
-            UASSERT_OBJ(c.stateSig[fi], tep->fromVtxp(),
-                        "Terminal-link source missing stateSig");
+            UASSERT_OBJ(c.stateSig[fi], tep->fromVtxp(), "Terminal-link source missing stateSig");
 
             AstNodeExpr* srcSigp = c.stateSig[fi]->cloneTreePure(false);
             srcSigp = andCond(c.flp, srcSigp, tep->m_condp);
@@ -1070,8 +1067,7 @@ class SvaNfaLowering final {
                 c.stateSig[i] = new AstVarRef{c.flp, c.stateVars[i], VAccess::READ};
             } else if (c.counterActiveVars[i]) {
                 // Builder always sets m_counterMin == 0; see buildSExpr.
-                c.stateSig[i]
-                    = new AstVarRef{c.flp, c.counterActiveVars[i], VAccess::READ};
+                c.stateSig[i] = new AstVarRef{c.flp, c.counterActiveVars[i], VAccess::READ};
             }
         }
         // Fixed-point propagation along zero-delay (Link) edges.
