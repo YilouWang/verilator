@@ -65,10 +65,10 @@ module t (
       a |-> (a throughout (b throughout (b ##1 c))))
     else count_fail6 <= count_fail6 + 1;
 
-  // Throughout with range-delay, pure-boolean RHS: midSource vertices inherit
-  // the throughout guard. Exercises the throughoutCond clone-and-AND path in
-  // wireMatchAndMidSources. Cover-only (behavior above unchanged).
-  cover property (@(posedge clk) a throughout (b[*1:3] ##1 c));
+  // Throughout with range-delay, pure-boolean RHS: the range-delay SExpr
+  // generates midSource vertices that inherit the throughout guard.
+  // Exercises the throughoutCond clone path in wireMatchAndMidSources.
+  cover property (@(posedge clk) a throughout (b ##[1:3] c));
 
   // Cover-with-throughout: isCover path deletes the reject signals generated
   // by the throughout-drop check.

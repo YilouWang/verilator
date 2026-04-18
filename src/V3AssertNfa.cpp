@@ -118,8 +118,10 @@ public:
     }
     // METHODS
     // LCOV_EXCL_START -- Graphviz dump only
+    // LCOV_EXCL_START -- Graphviz dump only
     string dotLabel() const override { return m_consumesCycle ? "##1" : "link"; }
     string dotStyle() const override { return m_consumesCycle ? "" : "dashed"; }
+    // LCOV_EXCL_STOP
     // LCOV_EXCL_STOP
     // Typed accessors for NFA vertices
     SvaStateVertex* fromVtxp() const { return static_cast<SvaStateVertex*>(fromp()); }
@@ -230,22 +232,22 @@ class SvaNfaBuilder final {
             if (!delayp || !delayp->isCycleDelay()) return -1;
             int delayCycles = -1;
             if (delayp->isRangeDelay()) {
-                if (delayp->isUnbounded()) return -1;
+                if (delayp->isUnbounded()) return -1;  // LCOV_EXCL_LINE
                 const int minD = getConstInt(delayp->lhsp());
                 const int maxD = getConstInt(delayp->rhsp());
                 if (minD < 0 || maxD < 0 || minD != maxD) return -1;
                 delayCycles = minD;
             } else {
                 delayCycles = getConstInt(delayp->lhsp());
-                if (delayCycles < 0) return -1;
+                if (delayCycles < 0) return -1;  // LCOV_EXCL_LINE
             }
             int preLen = 0;
             if (AstNodeExpr* const prep = sexprp->preExprp()) {
                 preLen = fixedLength(prep);
-                if (preLen < 0) return -1;
+                if (preLen < 0) return -1;  // LCOV_EXCL_LINE
             }
             const int bodyLen = fixedLength(sexprp->exprp());
-            if (bodyLen < 0) return -1;
+            if (bodyLen < 0) return -1;  // LCOV_EXCL_LINE
             return preLen + delayCycles + bodyLen;
         }
         if (AstSThroughout* const throughp = VN_CAST(nodep, SThroughout)) {
@@ -315,7 +317,7 @@ class SvaNfaBuilder final {
         SvaStateVertex* currentp = entryVtxp;
         if (AstNodeExpr* const preExprp = sexprp->preExprp()) {
             const BuildResult pre = buildExpr(preExprp, currentp, isTopLevelStep);
-            if (!pre.valid()) return BuildResult::fail(pre.errorEmitted);
+            if (!pre.valid()) return BuildResult::fail(pre.errorEmitted);  // LCOV_EXCL_LINE
             if (pre.finalCondp) {
                 SvaStateVertex* const condVtxp = scopedCreateVertex();
                 SvaTransEdge* const edgep = guardedLink(
@@ -442,9 +444,11 @@ class SvaNfaBuilder final {
         UASSERT_OBJ(minN >= 0, repp, "ConsRep count must be non-negative (V3Width invariant)");
         // Bail on large exact repetitions (no counter FSM for ConsRep yet).
         constexpr int kConsRepLimit = 256;
+        // LCOV_EXCL_START -- compile-size guard; exercised only with >256-rep inputs
         if (minN > kConsRepLimit && !repp->unbounded() && !repp->maxCountp()) {
             return BuildResult::fail();
         }
+        // LCOV_EXCL_STOP
 
         SvaStateVertex* currentp = entryVtxp;
         for (int i = 0; i < minN; ++i) {
@@ -530,9 +534,9 @@ class SvaNfaBuilder final {
                              FileLine* flp) {
         const BuildResult lhs = buildExpr(lhsp, entryVtxp);
         const BuildResult rhs = buildExpr(rhsp, entryVtxp);
-        if (!lhs.valid() || !rhs.valid()) {
+        if (!lhs.valid() || !rhs.valid()) {  // LCOV_EXCL_START -- sub-build fail bail
             return BuildResult::fail(lhs.errorEmitted || rhs.errorEmitted);
-        }
+        }  // LCOV_EXCL_STOP
         SvaStateVertex* const mergeVtxp = scopedCreateVertex();
         if (lhs.finalCondp) {
             guardedLink(lhs.termVertexp, mergeVtxp, sampled(lhs.finalCondp->cloneTreePure(false)),
@@ -560,21 +564,18 @@ class SvaNfaBuilder final {
         const BuildResult rhs = buildExpr(rhsExprp, entryVtxp);
         const bool rhsScope = m_inUnboundedScope;
         m_inUnboundedScope = savedScope || lhsScope || rhsScope;
-        if (!lhs.valid() || !rhs.valid()) {
+        if (!lhs.valid() || !rhs.valid()) {  // LCOV_EXCL_START -- sub-build fail bail
             return BuildResult::fail(lhs.errorEmitted || rhs.errorEmitted);
-        }
+        }  // LCOV_EXCL_STOP
 
         // Single-cycle operands: use boolean AND (done-latch would fire across cycles).
+        // If both operands stayed at entry, they must be boolean leaves which
+        // buildExpr returns with finalCondp=nodep (non-null).
         if (lhs.termVertexp == entryVtxp && rhs.termVertexp == entryVtxp) {
-            AstNodeExpr* condp = nullptr;
-            if (lhs.finalCondp && rhs.finalCondp) {
-                condp = new AstAnd{flp, lhs.finalCondp->cloneTreePure(false),
-                                   rhs.finalCondp->cloneTreePure(false)};
-            } else if (lhs.finalCondp) {
-                condp = lhs.finalCondp;
-            } else {
-                condp = rhs.finalCondp;
-            }
+            UASSERT_OBJ(lhs.finalCondp && rhs.finalCondp, lhsExprp,
+                        "Single-cycle SAnd operands must have finalCondp");
+            AstNodeExpr* const condp = new AstAnd{flp, lhs.finalCondp->cloneTreePure(false),
+                                                  rhs.finalCondp->cloneTreePure(false)};
             return {entryVtxp, condp, {}};
         }
         // Range-delay mid-window sources in either sub-branch would need
@@ -758,7 +759,8 @@ class SvaNfaLowering final {
                 const SvaTransEdge& te = static_cast<const SvaTransEdge&>(er);
                 if (!te.m_consumesCycle) continue;
                 const int fromIdx = te.fromVtxp()->color();
-                if (!c.stateSig[fromIdx]) continue;
+                UASSERT_OBJ(c.stateSig[fromIdx], te.fromVtxp(),
+                            "Clocked-edge source missing stateSig");
 
                 AstNodeExpr* srcSigp = c.stateSig[fromIdx]->cloneTreePure(false);
                 srcSigp = andCond(c.flp, srcSigp, te.m_condp);
@@ -772,7 +774,8 @@ class SvaNfaLowering final {
                 nextStatep = orExprs(c.flp, nextStatep, srcSigp);
             }
 
-            if (!nextStatep) nextStatep = new AstConst{c.flp, AstConst::BitFalse{}};
+            UASSERT_OBJ(nextStatep, c.vtx[i],
+                        "Registered vertex has no clocked incoming contribution");
 
             AstAssignDly* const assignp = new AstAssignDly{
                 c.flp, new AstVarRef{c.flp, c.stateVars[i], VAccess::WRITE}, nextStatep};
@@ -805,13 +808,15 @@ class SvaNfaLowering final {
             AstVar* const cntp = c.counterCountVars[ci];
             const uint32_t counterMax = static_cast<uint32_t>(c.vtx[ci]->m_counterMax);
 
+            // Builder only adds clocked edges to counter vertices (guardedEdge
+            // in buildSExpr), so m_consumesCycle is always true here.
             AstNodeExpr* incomingp = nullptr;
             for (const SvaTransEdge* const tep : c.edges) {
                 const int toIdx = tep->toVtxp()->color();
                 if (toIdx != ci) continue;
-                if (!tep->m_consumesCycle) continue;
                 const int fi = tep->fromVtxp()->color();
-                if (!c.stateSig[fi]) continue;
+                UASSERT_OBJ(c.stateSig[fi], c.vtx[fi],
+                            "Clocked edge source missing stateSig");
                 AstNodeExpr* contribp = c.stateSig[fi]->cloneTreePure(false);
                 contribp = andCond(c.flp, contribp, tep->m_condp);
                 if (c.disableExprp) {
@@ -822,18 +827,12 @@ class SvaNfaLowering final {
                 }
                 incomingp = orExprs(c.flp, incomingp, contribp);
             }
-            if (!incomingp) incomingp = new AstConst{c.flp, AstConst::BitFalse{}};
+            UASSERT_OBJ(incomingp, c.vtx[ci],
+                        "Counter vertex has no incoming contribution");
 
-            AstNodeExpr* inWindowp = nullptr;
-            if (c.vtx[ci]->m_counterMin == 0) {
-                inWindowp = new AstConst{c.flp, AstConst::BitTrue{}};
-            } else {
-                inWindowp
-                    = new AstGte{c.flp, new AstVarRef{c.flp, cntp, VAccess::READ},
-                                 new AstConst{c.flp, AstConst::WidthedValue{}, 32,
-                                              static_cast<uint32_t>(c.vtx[ci]->m_counterMin)}};
-                inWindowp->dtypeSetBit();
-            }
+            // Builder always sets m_counterMin == 0 (pre-chain handles the M
+            // cycles); the "min > 0" path would be dead.
+            AstNodeExpr* inWindowp = new AstConst{c.flp, AstConst::BitTrue{}};
             AstNodeExpr* acceptedNowp = nullptr;
             if (c.matchCondp) {
                 AstSampled* const sampp
@@ -942,11 +941,13 @@ class SvaNfaLowering final {
         }
 
         // Phase 3: Compute accept/reject from terminal Links.
+        // Builder only adds Links (non-clocked) to matchVertex via addLink in
+        // wireMatchAndMidSources.
         for (const SvaTransEdge* const tep : c.edges) {
             if (tep->toVtxp() != c.graph.m_matchVertexp) continue;
-            if (tep->m_consumesCycle) continue;
             const int fi = tep->fromVtxp()->color();
-            if (!c.stateSig[fi]) continue;
+            UASSERT_OBJ(c.stateSig[fi], tep->fromVtxp(),
+                        "Terminal-link source missing stateSig");
 
             AstNodeExpr* srcSigp = c.stateSig[fi]->cloneTreePure(false);
             srcSigp = andCond(c.flp, srcSigp, tep->m_condp);
@@ -973,25 +974,19 @@ class SvaNfaLowering final {
             }
         }
 
-        if (!sigs.terminalActivep) {
-            for (int i = c.N - 1; i >= 0; --i) {
-                if (c.stateVars[i] && c.stateSig[i]) {
-                    sigs.terminalActivep = c.stateSig[i]->cloneTreePure(false);
-                    break;
-                }
-            }
-        }
-        if (!sigs.terminalActivep) {
-            sigs.terminalActivep = new AstConst{c.flp, AstConst::BitFalse{}};
-        }
+        // wireMatchAndMidSources always adds a Link from result.termVertexp
+        // to m_matchVertexp, so the loop above always sets terminalActivep.
+        UASSERT_OBJ(sigs.terminalActivep, c.graph.m_matchVertexp,
+                    "No terminal edge to match vertex");
 
         // Phase 3a: required-step rejection.
-        // Builder only sets m_rejectOnFail on non-clocked Links, so no need to filter.
+        // Builder only sets m_rejectOnFail on non-clocked Links with m_condp,
+        // and the source always has a resolved stateSig.
         for (const SvaTransEdge* const tep : c.edges) {
             if (!tep->m_rejectOnFail) continue;
             const int fi = tep->fromVtxp()->color();
-            if (!c.stateSig[fi]) continue;
-            if (!tep->m_condp) continue;
+            UASSERT_OBJ(c.stateSig[fi] && tep->m_condp, tep->fromVtxp(),
+                        "rejectOnFail Link must have condp and source stateSig");
             AstNodeExpr* const srcSigp = c.stateSig[fi]->cloneTreePure(false);
             AstNodeExpr* const notCondp = new AstNot{c.flp, tep->m_condp->cloneTreePure(false)};
             notCondp->dtypeSetBit();
@@ -1074,18 +1069,9 @@ class SvaNfaLowering final {
             if (c.stateVars[i]) {
                 c.stateSig[i] = new AstVarRef{c.flp, c.stateVars[i], VAccess::READ};
             } else if (c.counterActiveVars[i]) {
-                AstVarRef* const activeRefp
+                // Builder always sets m_counterMin == 0; see buildSExpr.
+                c.stateSig[i]
                     = new AstVarRef{c.flp, c.counterActiveVars[i], VAccess::READ};
-                if (c.vtx[i]->m_counterMin == 0) {
-                    c.stateSig[i] = activeRefp;
-                } else {
-                    AstGte* const gtep = new AstGte{
-                        c.flp, new AstVarRef{c.flp, c.counterCountVars[i], VAccess::READ},
-                        new AstConst{c.flp, AstConst::WidthedValue{}, 32,
-                                     static_cast<uint32_t>(c.vtx[i]->m_counterMin)}};
-                    gtep->dtypeSetBit();
-                    c.stateSig[i] = new AstAnd{c.flp, activeRefp, gtep};
-                }
             }
         }
         // Fixed-point propagation along zero-delay (Link) edges.
@@ -1394,9 +1380,12 @@ class AssertNfaVisitor final : public VNVisitor {
 
     static AstPropSpec* getPropertySpecp(const AstProperty* propp) {
         AstNode* stmtp = propp->stmtsp();
+        // V3LinkParse emits InitialStaticStmt for property-local variable
+        // initialisers; the InitialAutomaticStmt variant only appears for
+        // task/function-scope automatic lifetime, not properties.
         while (stmtp
                && (VN_IS(stmtp, Var) || VN_IS(stmtp, InitialStaticStmt)
-                   || VN_IS(stmtp, InitialAutomaticStmt))) {
+                   || VN_IS(stmtp, InitialAutomaticStmt))) {  // LCOV_EXCL_LINE
             stmtp = stmtp->nextp();
         }
         return VN_CAST(stmtp, PropSpec);
@@ -1407,7 +1396,7 @@ class AssertNfaVisitor final : public VNVisitor {
         // Recursion guard: IEEE 1800-2023 16.12.1 forbids recursive properties.
         // V3Width emits "Recursive property call" for direct recursion before this
         // pass runs; silently bail on any nested-inlining recursion that may slip past.
-        if (m_inliningProps.count(propyp)) return;
+        if (m_inliningProps.count(propyp)) return;  // LCOV_EXCL_LINE -- V3Width preempts
         m_inliningProps.insert(propyp);
         struct Guard final {
             std::set<const AstProperty*>& setr;

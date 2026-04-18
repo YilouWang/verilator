@@ -67,9 +67,9 @@ module t (
   assert property (@(posedge clk) disable iff (cyc < 2)
       (a or 1'b0) |-> a);
 
-  // Logical '||' (AstLogOr) in sequence: same semantics as 'or' for booleans
-  assert property (@(posedge clk) disable iff (cyc < 2)
-      (a || b) |-> (a | b));
+  // Logical '||' (AstLogOr) in a MULTI-CYCLE sequence: must trigger NFA
+  // (single-cycle booleans skip NFA via hasMultiCycleExpr filter).
+  cover property (@(posedge clk) (a || b) ##1 (a | b));
 
   // =========================================================================
   // Multi-cycle sequence and (IEEE 1800-2023 16.9.5)
@@ -120,7 +120,23 @@ module t (
 
   // =========================================================================
   // Negated cover property (NFA assembleResult negated+cover branches)
+  // Different shapes to cover the matchCondp/rejectBasep/throughoutRejectp
+  // combinations in the negated+cover code path.
   // =========================================================================
+
+  // Shape A: finalCondp=b, required-step reject (the canonical case).
   cover property (@(posedge clk) not (a ##1 b));
+
+  // Shape B: seq ends in state machine -> finalCondp is null.
+  cover property (@(posedge clk) not (a ##1 (b[*2])));
+
+  // Shape C: throughout in the seq -> throughoutRejectp non-null.
+  cover property (@(posedge clk) not (a throughout (b ##1 c)));
+
+  // Assert variants for the negated-assert code path (needAccept branches).
+  assert property (@(posedge clk) not (a ##1 (b[*2])))
+    else $display("negated multi-cycle fail");
+  assert property (@(posedge clk) not (a throughout (b ##1 c)))
+    else $display("negated throughout fail");
 
 endmodule

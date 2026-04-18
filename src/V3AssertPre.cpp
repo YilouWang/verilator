@@ -708,7 +708,9 @@ private:
         // IEEE 1800-2023 16.9.2 -- Lower standalone exact [*N] (N >= 2) via saturating counter.
         // Range/unbounded forms and SExpr-contained forms are lowered by V3AssertNfa.
         iterateChildren(nodep);
-        if (nodep->unbounded() || nodep->maxCountp()) return;  // Handled by V3AssertNfa
+        // V3AssertNfa handles unbounded/ranged forms upstream, so this fast-path
+        // is effectively unreachable when NFA is enabled.
+        if (nodep->unbounded() || nodep->maxCountp()) return;  // LCOV_EXCL_LINE
         const AstConst* const constp = VN_CAST(nodep->countp(), Const);
         if (VL_UNLIKELY(!constp || constp->toSInt() < 1)) {
             nodep->v3fatalSrc("Consecutive repetition count must be a positive constant"
