@@ -166,4 +166,11 @@ module t (
   assert property (@(posedge clk) not (a throughout (b[*2])))
     else $display("negated throughout state-end");
 
+  // Negated assert with throughout AND an explicit pass-action: needAccept is
+  // true (pass block set), so assembleResult runs with outMatchpp!=null and
+  // throughoutRejectp non-null, exercising the needAccept-path throughout
+  // branch of notPMatchp assembly.
+  assert property (@(posedge clk) not (a throughout (b ##1 c)))
+    $display("negated throughout with pass action");
+
 endmodule

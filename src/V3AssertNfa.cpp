@@ -1706,23 +1706,23 @@ class AssertNfaVisitor final : public VNVisitor {
 
         // Gate pass handler on match to prevent vacuous-pass firings.
         if (needAccept && matchExprp) {
+            // needAccept implies passsp() was non-null when evaluated above;
+            // lowering does not mutate the assert's pass-action between the
+            // two reads, so passsp() is still non-null here.
             AstNode* passsp = assertAssertp->passsp();
-            if (passsp) {
-                passsp->unlinkFrBackWithNext();
-                assertAssertp->addPasssp(new AstIf{flp, matchExprp->cloneTreePure(false),
-                                                   passsp->cloneTree(false), nullptr});
-                // Fail-handler prefix for overlapping instances (IEEE 16.12):
-                // fires when reject=1 && match=1 in the same cycle.
-                if (AstNode* const failsp = assertAssertp->failsp()) {
-                    failsp->addHereThisAsNext(
-                        new AstIf{flp, matchExprp, passsp->cloneTree(false), nullptr});
-                } else {
-                    VL_DO_DANGLING(pushDeletep(matchExprp), matchExprp);
-                }
-                VL_DO_DANGLING(pushDeletep(passsp), passsp);
+            UASSERT_OBJ(passsp, assertAssertp, "needAccept set but passsp is null");
+            passsp->unlinkFrBackWithNext();
+            assertAssertp->addPasssp(new AstIf{flp, matchExprp->cloneTreePure(false),
+                                               passsp->cloneTree(false), nullptr});
+            // Fail-handler prefix for overlapping instances (IEEE 16.12):
+            // fires when reject=1 && match=1 in the same cycle.
+            if (AstNode* const failsp = assertAssertp->failsp()) {
+                failsp->addHereThisAsNext(
+                    new AstIf{flp, matchExprp, passsp->cloneTree(false), nullptr});
             } else {
                 VL_DO_DANGLING(pushDeletep(matchExprp), matchExprp);
             }
+            VL_DO_DANGLING(pushDeletep(passsp), passsp);
         }
 
         // Extra fail-handler fires for simultaneous required-step failures
