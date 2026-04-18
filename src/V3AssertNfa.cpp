@@ -118,10 +118,8 @@ public:
     }
     // METHODS
     // LCOV_EXCL_START -- Graphviz dump only
-    // LCOV_EXCL_START -- Graphviz dump only
     string dotLabel() const override { return m_consumesCycle ? "##1" : "link"; }
     string dotStyle() const override { return m_consumesCycle ? "" : "dashed"; }
-    // LCOV_EXCL_STOP
     // LCOV_EXCL_STOP
     // Typed accessors for NFA vertices
     SvaStateVertex* fromVtxp() const { return static_cast<SvaStateVertex*>(fromp()); }
