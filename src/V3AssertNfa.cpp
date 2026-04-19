@@ -1151,7 +1151,8 @@ class SvaNfaLowering final {
         // Property negation (IEEE 1800-2023 16.12.1 `not`): invert match/reject.
         if (negated) {
             if (isCover) {
-                if (terminalActivep) VL_DO_DANGLING(terminalActivep->deleteTree(), terminalActivep);
+                if (terminalActivep)
+                    VL_DO_DANGLING(terminalActivep->deleteTree(), terminalActivep);
                 AstNodeExpr* negRejectp = nullptr;
                 if (matchCondp && rejectBasep) {
                     AstNodeExpr* const sampledCondp
@@ -1193,16 +1194,20 @@ class SvaNfaLowering final {
                         = orExprs(flp, notPMatchp, requiredStepRejectp->cloneTreePure(false));
                 *outMatchpp = notPMatchp;
             }
-            if (throughoutRejectp) VL_DO_DANGLING(throughoutRejectp->deleteTree(), throughoutRejectp);
+            if (throughoutRejectp)
+                VL_DO_DANGLING(throughoutRejectp->deleteTree(), throughoutRejectp);
             if (rejectBasep) VL_DO_DANGLING(rejectBasep->deleteTree(), rejectBasep);
-            if (requiredStepRejectp) VL_DO_DANGLING(requiredStepRejectp->deleteTree(), requiredStepRejectp);
+            if (requiredStepRejectp)
+                VL_DO_DANGLING(requiredStepRejectp->deleteTree(), requiredStepRejectp);
             AstNodeExpr* const resultExprp = new AstNot{flp, matchp};
             return resultExprp;
         }
         if (isCover) {
-            if (throughoutRejectp) VL_DO_DANGLING(throughoutRejectp->deleteTree(), throughoutRejectp);
+            if (throughoutRejectp)
+                VL_DO_DANGLING(throughoutRejectp->deleteTree(), throughoutRejectp);
             if (rejectBasep) VL_DO_DANGLING(rejectBasep->deleteTree(), rejectBasep);
-            if (requiredStepRejectp) VL_DO_DANGLING(requiredStepRejectp->deleteTree(), requiredStepRejectp);
+            if (requiredStepRejectp)
+                VL_DO_DANGLING(requiredStepRejectp->deleteTree(), requiredStepRejectp);
             if (matchCondp) {
                 AstNodeExpr* const sampledCondp
                     = new AstSampled{flp, matchCondp->cloneTreePure(false)};
