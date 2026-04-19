@@ -1955,10 +1955,8 @@ class ConstraintExprVisitor final : public VNVisitor {
     void visit(AstStmtExpr* nodep) override {}
     void visit(AstCStmt* nodep) override {}
     void visit(AstIf* nodep) override {
-        // AstIf nodes appear in the constraint-items list ONLY when the
-        // disable-soft hoisting pre-pass attached runtime-conditional
-        // disable_soft calls.  They are already fully lowered C++ runtime
-        // statements and must not be touched by the SMT-lowering visitor.
+        // Hoisted runtime-conditional disable_soft statements parked in the
+        // constraint-items list by the pre-pass; already fully lowered.
     }
     void visit(AstConstraintIf* nodep) override {
         AstNodeExpr* newp = nullptr;
@@ -2145,14 +2143,11 @@ class ConstraintExprVisitor final : public VNVisitor {
     }
 
     void visit(AstConstraintExpr* nodep) override {
-        // IEEE 1800-2023 18.5.13: "disable soft" removes all soft constraints
-        // referencing the specified variable.  It is a meta-level directive
-        // (edits the constraint graph, not an SMT predicate).  When it appears
-        // inside a conditional body (if / foreach / implication) the
-        // extractConditionalDisableSofts() pre-pass has already rewritten it
-        // as a runtime-conditional AstIf attached to the setup task; by the
-        // time we reach this visitor any 'disable soft' here is at the
-        // constraint-block top level (unconditional).
+        // IEEE 1800-2023 18.5.13: 'disable soft' is a meta-level directive on
+        // the constraint graph, lowered to a void RANDOMIZER_DISABLE_SOFT
+        // call.  Conditional occurrences (if / foreach / implication body)
+        // are rewritten by extractConditionalDisableSofts() before this
+        // visitor runs, so anything we see here is unconditional.
         if (nodep->isDisableSoft()) {
             if (AstNode* const stmtp = buildDisableSoftCallStmt(nodep)) {
                 nodep->replaceWith(stmtp);
@@ -2544,10 +2539,10 @@ class ConstraintExprVisitor final : public VNVisitor {
             "Visit function missing? Constraint function missing for node: " << nodep);
     }
 
-    // Build the AstStmtExpr(AstCMethodHard RANDOMIZER_DISABLE_SOFT) for a
-    // given disable-soft constraint expression.  Shared by the unconditional
-    // lowering path in visit(AstConstraintExpr) and by the conditional
-    // hoisting pre-pass below.
+    // Build the runtime statement that calls RANDOMIZER_DISABLE_SOFT on the
+    // variable referenced by the given AstConstraintExpr (must be a VarRef
+    // or MemberSel).  Shared by visit(AstConstraintExpr) and the
+    // conditional-hoisting pre-pass.
     AstNode* buildDisableSoftCallStmt(AstConstraintExpr* nodep) {
         std::string varName;
         if (const AstNodeVarRef* const vrefp = VN_CAST(nodep->exprp(), NodeVarRef)) {
@@ -2568,17 +2563,15 @@ class ConstraintExprVisitor final : public VNVisitor {
         return callp->makeStmt();
     }
 
-    // Pre-pass: walk the constraint-items list recursively; for every
-    // AstConstraintExpr(isDisableSoft) nested inside an AstConstraintIf
-    // subtree, build a runtime-conditional `if (accumulated_cond)
-    // randomizer.disable_soft(var);` statement and return it in the hoist
-    // list.  The original in-tree ConstraintExpr is replaced with a vacuous
-    // `1'b1` constraint so the surrounding SMT fold is unaffected.  Returned
-    // hoist list is expected to be appended to the constraint-items chain
-    // (which becomes the setup-task body; the setup task runs before each
-    // randomize() call, so the hoisted if/disable_soft pair effectively
-    // implements the conditional semantics of IEEE 1800-2023 18.5.13 nested
-    // inside an if/implication).
+    // Pre-pass: for every AstConstraintExpr(isDisableSoft) nested inside an
+    // AstConstraintIf subtree (any depth), return a list of runtime AstIf
+    // statements `if (accumulated_cond) randomizer.disable_soft(var);` where
+    // accumulated_cond AND-folds the enclosing then/else branch conditions.
+    // The original ConstraintExpr is replaced with `1'b1` so editSingle()
+    // folds the surrounding boolean cleanly.  Caller appends the returned
+    // list to the constraint-items chain; that chain becomes the setup task
+    // body, which runs before the solver on every randomize() call -- giving
+    // disable-soft real conditional semantics per IEEE 1800-2023 18.5.13.
     AstNode* extractConditionalDisableSofts(AstNode* itemsp, AstNodeExpr* outerCondp) {
         AstNode* hoistListp = nullptr;
         for (AstNode *stmtp = itemsp, *nextp; stmtp; stmtp = nextp) {
@@ -2631,10 +2624,9 @@ class ConstraintExprVisitor final : public VNVisitor {
                     }
                 }
             }
-            // AstConstraintForeach / AstConstraintUnique are left as-is:
-            // disable-soft inside a foreach iteration would require per-
-            // iteration conditions (possible but not common), and unique
-            // cannot contain disable-soft.
+            // foreach/unique bodies are left untouched: disable-soft inside
+            // a foreach would need per-iteration condition support, and
+            // unique cannot legally contain disable-soft.
         }
         return hoistListp;
     }
@@ -2654,12 +2646,10 @@ public:
         , m_memberMap{memberMap}
         , m_writtenVars{writtenVars}
         , m_sizeConstrainedArraysp{sizeConstrainedArraysp} {
-        // Hoist any disable-soft directives nested inside conditional bodies
-        // into runtime-conditional AstIf statements before the main SMT
-        // lowering runs.  Attach the hoisted AstIfs as next-siblings of the
-        // last item in nodep's chain so they ride along with the constraint
-        // items into the setup task; the SMT visitor skips them via the
-        // visit(AstIf) no-op above.
+        // Pre-pass before SMT lowering: extract conditional disable-soft
+        // directives as runtime AstIf statements and append them to the
+        // constraint-items chain so they reach the setup task body.  The SMT
+        // visitor skips these via visit(AstIf) above.
         if (AstNode* const hoistListp
             = nodep ? extractConditionalDisableSofts(nodep, nullptr) : nullptr) {
             AstNode* tailp = nodep;

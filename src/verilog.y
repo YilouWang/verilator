@@ -5079,13 +5079,11 @@ expr<nodeExprp>:                // IEEE: part of expression/constant_expression/
         |       type_referenceEq yP_EQUAL type_referenceBoth         { $$ = new AstEqT{$2, $1, $3}; }
         |       type_referenceEq yP_NOTEQUAL type_referenceBoth      { $$ = new AstNeqT{$2, $1, $3}; }
         //                      // IEEE: expr yP_MINUSGT expr  (1800-2009)
-        //                      // The brace-block form of IEEE 1800-2023 18.7.2
-        //                      // (expr yP_MINUSGT '{' constraint_expressionList '}')
-        //                      // is handled by a dedicated production in
-        //                      // constraint_expression.  The single-non-expression
-        //                      // statement form (expr yP_MINUSGT if/foreach/unique/...)
-        //                      // remains unsupported because folding it here would
-        //                      // conflict with the active expr->expr rule below.
+        //                      // Full IEEE 1800-2023 18.7.2 "expr ->
+        //                      // constraint_set" is split: this rule handles
+        //                      // the bare-expression RHS as a boolean
+        //                      // (AstLogIf), constraint_expression has one
+        //                      // production per non-expression RHS shape.
         |       ~l~expr yP_MINUSGT ~r~expr              { $$ = new AstLogIf{$2, $1, $3}; }
         //
         //                      // <= is special, as we need to disambiguate it with <= assignment
@@ -7906,13 +7904,15 @@ constraint_expression<nodep>:  // ==IEEE: constraint_expression
         |       yUNIQUE '{' range_list '}' ';'
                         { $$ = new AstConstraintUnique{$1, $3}; }
         //                      // IEEE: expr yP_MINUSGT constraint_set
-        //                      // The single-expression "expr -> expr ;" is parsed via
-        //                      // the general expr rule (-> AstLogIf) and reaches here
-        //                      // through "expr ';'" above.  All non-expression RHS
-        //                      // shapes IEEE allows under constraint_set are enumerated
-        //                      // explicitly below.  Each builds an outer AstConstraintIf
-        //                      // (cond=lhs, then=inner_stmt, else=nullptr) that V3Randomize
-        //                      // already lowers identically to the "if (expr) ..." path.
+        //                      // The bare-expression case "expr -> expr ;"
+        //                      // arrives via the general expr rule above
+        //                      // (AstLogIf) and matches "expr ';'".  Each
+        //                      // production below covers one constraint_set
+        //                      // shape that is not a plain expression and
+        //                      // builds an outer AstConstraintIf wrapping the
+        //                      // statement V3Randomize already knows how to
+        //                      // lower (with disable-soft hoisted by the
+        //                      // ConstraintExprVisitor pre-pass).
         |       expr yP_MINUSGT '{' constraint_expressionList '}'
                         { $$ = new AstConstraintIf{$2, $1, $4, nullptr}; }
         |       expr yP_MINUSGT yIF '(' expr ')' constraint_set %prec prLOWER_THAN_ELSE
