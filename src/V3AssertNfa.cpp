@@ -64,7 +64,8 @@ public:
     std::vector<AstNodeExpr*> m_throughoutConds;
     // Counter FSM vertex for ##[M:N] when N-M > kChainLimit
     bool m_isCounter = false;
-    int m_counterMax = 0;  // Counter window maximum (min is always 0; pre-chain handles the M offset)
+    int m_counterMax
+        = 0;  // Counter window maximum (min is always 0; pre-chain handles the M offset)
     // Liveness terminal (IEEE weak semantics): reject must not fire from this source
     bool m_isUnbounded = false;
     // Temporal sequence AND combiner; IEEE 1800-2023 16.9.5
@@ -787,9 +788,9 @@ class SvaNfaLowering final {
         // snapshotVarp and disableCntVarp are allocated together.
         if (c.snapshotVarp) {
             UASSERT_OBJ(c.disableCntVarp, c.senTreep, "snapshotVarp set without disableCntVarp");
-            bodyp->addNext(new AstAssignDly{
-                c.flp, new AstVarRef{c.flp, c.snapshotVarp, VAccess::WRITE},
-                new AstVarRef{c.flp, c.disableCntVarp, VAccess::READ}});
+            bodyp->addNext(
+                new AstAssignDly{c.flp, new AstVarRef{c.flp, c.snapshotVarp, VAccess::WRITE},
+                                 new AstVarRef{c.flp, c.disableCntVarp, VAccess::READ}});
         }
         m_modp->addStmtsp(
             new AstAlways{c.flp, VAlwaysKwd::ALWAYS, c.senTreep->cloneTree(false), bodyp});
@@ -812,7 +813,8 @@ class SvaNfaLowering final {
                 const int toIdx = tep->toVtxp()->color();
                 if (toIdx != ci) continue;
                 const int fi = tep->fromVtxp()->color();
-                UASSERT_OBJ(c.vtx[fi]->datap()->stateSigp, c.vtx[fi], "Clocked edge source missing stateSig");
+                UASSERT_OBJ(c.vtx[fi]->datap()->stateSigp, c.vtx[fi],
+                            "Clocked edge source missing stateSig");
                 AstNodeExpr* contribp = c.vtx[fi]->datap()->stateSigp->cloneTreePure(false);
                 contribp = andCond(c.flp, contribp, tep->m_condp);
                 if (c.disableExprp) {
@@ -883,14 +885,16 @@ class SvaNfaLowering final {
                         "AndCombiner vertex missing LHS/RHS terminal");
             const int l = avp->m_andLhsTermp->color();
             const int r = avp->m_andRhsTermp->color();
-            if (!c.vtx[l]->datap()->stateSigp || !c.vtx[r]->datap()->stateSigp || !c.vtx[ai]->datap()->stateSigp) continue;
+            if (!c.vtx[l]->datap()->stateSigp || !c.vtx[r]->datap()->stateSigp
+                || !c.vtx[ai]->datap()->stateSigp)
+                continue;
 
-            AstAssignDly* const clearLp
-                = new AstAssignDly{c.flp, new AstVarRef{c.flp, c.vtx[ai]->datap()->doneLVarp, VAccess::WRITE},
-                                   new AstConst{c.flp, AstConst::BitFalse{}}};
-            AstAssignDly* const clearRp
-                = new AstAssignDly{c.flp, new AstVarRef{c.flp, c.vtx[ai]->datap()->doneRVarp, VAccess::WRITE},
-                                   new AstConst{c.flp, AstConst::BitFalse{}}};
+            AstAssignDly* const clearLp = new AstAssignDly{
+                c.flp, new AstVarRef{c.flp, c.vtx[ai]->datap()->doneLVarp, VAccess::WRITE},
+                new AstConst{c.flp, AstConst::BitFalse{}}};
+            AstAssignDly* const clearRp = new AstAssignDly{
+                c.flp, new AstVarRef{c.flp, c.vtx[ai]->datap()->doneRVarp, VAccess::WRITE},
+                new AstConst{c.flp, AstConst::BitFalse{}}};
             clearLp->addNext(clearRp);
 
             AstNodeExpr* const matchLNowp
@@ -907,18 +911,18 @@ class SvaNfaLowering final {
                     = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
                 gateRp = new AstAnd{c.flp, gateRp, notDisRp};
             }
-            AstAssignDly* const setLp
-                = new AstAssignDly{c.flp, new AstVarRef{c.flp, c.vtx[ai]->datap()->doneLVarp, VAccess::WRITE},
-                                   new AstConst{c.flp, AstConst::BitTrue{}}};
+            AstAssignDly* const setLp = new AstAssignDly{
+                c.flp, new AstVarRef{c.flp, c.vtx[ai]->datap()->doneLVarp, VAccess::WRITE},
+                new AstConst{c.flp, AstConst::BitTrue{}}};
             AstIf* const setLIfp = new AstIf{c.flp, gateLp, setLp, nullptr};
-            AstAssignDly* const setRp
-                = new AstAssignDly{c.flp, new AstVarRef{c.flp, c.vtx[ai]->datap()->doneRVarp, VAccess::WRITE},
-                                   new AstConst{c.flp, AstConst::BitTrue{}}};
+            AstAssignDly* const setRp = new AstAssignDly{
+                c.flp, new AstVarRef{c.flp, c.vtx[ai]->datap()->doneRVarp, VAccess::WRITE},
+                new AstConst{c.flp, AstConst::BitTrue{}}};
             AstIf* const setRIfp = new AstIf{c.flp, gateRp, setRp, nullptr};
             setLIfp->addNext(setRIfp);
 
-            AstIf* const topp
-                = new AstIf{c.flp, c.vtx[ai]->datap()->stateSigp->cloneTreePure(false), clearLp, setLIfp};
+            AstIf* const topp = new AstIf{
+                c.flp, c.vtx[ai]->datap()->stateSigp->cloneTreePure(false), clearLp, setLIfp};
             m_modp->addStmtsp(
                 new AstAlways{c.flp, VAlwaysKwd::ALWAYS, c.senTreep->cloneTree(false), topp});
         }
@@ -984,12 +988,11 @@ class SvaNfaLowering final {
             for (AstNodeExpr* const cp : conds) {
                 AstSampled* const sp = new AstSampled{c.flp, cp->cloneTreePure(false)};
                 sp->dtypeFrom(cp);
-                guardp
-                    = guardp ? static_cast<AstNodeExpr*>(new AstAnd{c.flp, guardp, sp}) : sp;
+                guardp = guardp ? static_cast<AstNodeExpr*>(new AstAnd{c.flp, guardp, sp}) : sp;
             }
             AstNodeExpr* const notGuardp = new AstNot{c.flp, guardp};
-            sigs.throughoutRejectp = orExprs(c.flp, sigs.throughoutRejectp,
-                                             new AstAnd{c.flp, stateExprp, notGuardp});
+            sigs.throughoutRejectp
+                = orExprs(c.flp, sigs.throughoutRejectp, new AstAnd{c.flp, stateExprp, notGuardp});
         }
     }
 
@@ -1069,10 +1072,12 @@ class SvaNfaLowering final {
         c.vtx[c.startIdx]->datap()->stateSigp = triggerExprp->cloneTreePure(false);
         for (int i = 0; i < c.N; ++i) {
             if (c.vtx[i]->datap()->stateVarp) {
-                c.vtx[i]->datap()->stateSigp = new AstVarRef{c.flp, c.vtx[i]->datap()->stateVarp, VAccess::READ};
+                c.vtx[i]->datap()->stateSigp
+                    = new AstVarRef{c.flp, c.vtx[i]->datap()->stateVarp, VAccess::READ};
             } else if (c.vtx[i]->datap()->counterActiveVarp) {
                 // Counter window is always [0, m_counterMax]; see buildSExpr.
-                c.vtx[i]->datap()->stateSigp = new AstVarRef{c.flp, c.vtx[i]->datap()->counterActiveVarp, VAccess::READ};
+                c.vtx[i]->datap()->stateSigp
+                    = new AstVarRef{c.flp, c.vtx[i]->datap()->counterActiveVarp, VAccess::READ};
             }
         }
         // Fixed-point propagation along zero-delay (Link) edges.
@@ -1096,9 +1101,11 @@ class SvaNfaLowering final {
                 AstNodeExpr* const matchRp
                     = buildMatchNow(c.flp, c.vtx[r]->datap()->stateSigp, c.vtx[i]->m_andRhsCondp);
                 AstNodeExpr* const doneLOrp = new AstOr{
-                    c.flp, new AstVarRef{c.flp, c.vtx[i]->datap()->doneLVarp, VAccess::READ}, matchLp};
+                    c.flp, new AstVarRef{c.flp, c.vtx[i]->datap()->doneLVarp, VAccess::READ},
+                    matchLp};
                 AstNodeExpr* const doneROrp = new AstOr{
-                    c.flp, new AstVarRef{c.flp, c.vtx[i]->datap()->doneRVarp, VAccess::READ}, matchRp};
+                    c.flp, new AstVarRef{c.flp, c.vtx[i]->datap()->doneRVarp, VAccess::READ},
+                    matchRp};
                 AstNodeExpr* const bothp = new AstAnd{c.flp, doneLOrp, doneROrp};
                 AstNodeExpr* const oneNowp = new AstOr{c.flp, matchLp->cloneTreePure(false),
                                                        matchRp->cloneTreePure(false)};
@@ -1113,13 +1120,14 @@ class SvaNfaLowering final {
                     if (te.m_consumesCycle) continue;
                     const int ti = te.toVtxp()->color();
                     if (te.toVtxp()->m_isMatch || te.toVtxp()->m_isRejectSink) continue;
-                    AstNodeExpr* const contributionp
-                        = andCond(c.flp, c.vtx[fi]->datap()->stateSigp->cloneTreePure(false), te.m_condp);
+                    AstNodeExpr* const contributionp = andCond(
+                        c.flp, c.vtx[fi]->datap()->stateSigp->cloneTreePure(false), te.m_condp);
                     if (!c.vtx[ti]->datap()->stateSigp) {
                         c.vtx[ti]->datap()->stateSigp = contributionp;
                         changed = true;
                     } else if (!c.vtx[ti]->datap()->needsReg) {
-                        c.vtx[ti]->datap()->stateSigp = orExprs(c.flp, c.vtx[ti]->datap()->stateSigp, contributionp);
+                        c.vtx[ti]->datap()->stateSigp
+                            = orExprs(c.flp, c.vtx[ti]->datap()->stateSigp, contributionp);
                         changed = true;
                     } else {
                         contributionp->deleteTree();
@@ -1310,18 +1318,9 @@ public:
         }
 
         // Build lowering context for phase sub-functions.
-        LowerCtx c{flp,
-                   N,
-                   vtx,
-                   edges,
-                   startIdx,
-                   matchIdx,
-                   senTreep,
-                   disableExprp,
-                   matchCondp,
-                   disableCntVarp,
-                   snapshotVarp,
-                   graph};
+        LowerCtx c{flp,          N,        vtx,          edges,      startIdx,
+                   matchIdx,     senTreep, disableExprp, matchCondp, disableCntVarp,
+                   snapshotVarp, graph};
 
         // Phase 1: Resolve combinational Links via fixed-point propagation.
         resolveLinks(c, triggerExprp);
@@ -1334,10 +1333,9 @@ public:
         // Phase 3/3a/3b: Compute terminal match/reject signals (cleans up stateSig).
         const SignalSet sigs = computeSignals(c, outRequiredStepSrcsp);
 
-        AstNodeExpr* const resultp
-            = assembleResult(flp, isCover, negated, matchCondp, sigs.terminalActivep,
-                             sigs.rejectBasep, sigs.throughoutRejectp, sigs.requiredStepRejectp,
-                             outMatchpp);
+        AstNodeExpr* const resultp = assembleResult(
+            flp, isCover, negated, matchCondp, sigs.terminalActivep, sigs.rejectBasep,
+            sigs.throughoutRejectp, sigs.requiredStepRejectp, outMatchpp);
 
         // Clear userp on every vertex before vertexData unique_ptrs are destroyed.
         for (int i = 0; i < N; ++i) vtx[i]->userp(nullptr);
@@ -1592,9 +1590,8 @@ class AssertNfaVisitor final : public VNVisitor {
     // Build the NFA graph for a property body, handling both the antecedent
     // |-> consequent and simple sequence cases. Returns the consequent/body
     // BuildResult (invalid on parse/build failure).
-    BuildResult buildAssertionGraph(SvaNfaBuilder& builder, SvaGraph& graph,
-                                    AstNodeExpr* seqBodyp, const PropertyParts& parts,
-                                    FileLine* flp) {
+    BuildResult buildAssertionGraph(SvaNfaBuilder& builder, SvaGraph& graph, AstNodeExpr* seqBodyp,
+                                    const PropertyParts& parts, FileLine* flp) {
         if (!parts.hasImplication) return builder.build(seqBodyp);
 
         graph.m_startVertexp = graph.createStateVertex();
@@ -1757,8 +1754,8 @@ class AssertNfaVisitor final : public VNVisitor {
         if (disableExprUnlinked) VL_DO_DANGLING(pushDeletep(disableExprp), disableExprp);
         if (result.finalCondp && !result.finalCondp->backp()) pushDeletep(result.finalCondp);
 
-        attachMatchHandlers(flp, assertAssertp, assertWithFailp,
-                            needMatch ? matchExprp : nullptr, perSrcSenTreep, requiredStepSrcs);
+        attachMatchHandlers(flp, assertAssertp, assertWithFailp, needMatch ? matchExprp : nullptr,
+                            perSrcSenTreep, requiredStepSrcs);
 
         AstNode* const innerPropp = propSpecp->propp();
         innerPropp->replaceWith(outputExprp);
