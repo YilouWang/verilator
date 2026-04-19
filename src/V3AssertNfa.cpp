@@ -405,7 +405,6 @@ class SvaNfaBuilder final {
                             SvaStateVertex* const nextVtxp = scopedCreateVertex();
                             AstNodeExpr* const notExprp
                                 = new AstNot{flp, sampled(exprp->cloneTreePure(false))};
-                            notExprp->dtypeSetBit();
                             guardedEdge(currentp, nextVtxp, notExprp, flp);
                             if (i < range - 1) rangeMidSources.push_back(nextVtxp);
                             currentp = nextVtxp;
@@ -520,7 +519,6 @@ class SvaNfaBuilder final {
             // and was discarded by Phase 2 (waitNode has a self-loop Edge).
             guardedEdge(currentp, waitVtxp, flp);
             AstNodeExpr* const notExprp = new AstNot{flp, exprp->cloneTreePure(false)};
-            notExprp->dtypeSetBit();
             guardedEdge(waitVtxp, waitVtxp, sampled(notExprp), flp);
             SvaStateVertex* const matchVtxp = scopedCreateVertex();
             guardedLink(waitVtxp, matchVtxp, sampled(exprp->cloneTreePure(false)), flp);
@@ -766,7 +764,6 @@ class SvaNfaLowering final {
                 if (c.disableExprp && !c.snapshotVarp) {
                     AstNodeExpr* const notDisp
                         = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
-                    notDisp->dtypeSetBit();
                     srcSigp = new AstAnd{c.flp, srcSigp, notDisp};
                 }
                 nextStatep = orExprs(c.flp, nextStatep, srcSigp);
@@ -821,7 +818,6 @@ class SvaNfaLowering final {
                 if (c.disableExprp) {
                     AstNodeExpr* const notDisp
                         = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
-                    notDisp->dtypeSetBit();
                     contribp = new AstAnd{c.flp, contribp, notDisp};
                 }
                 incomingp = orExprs(c.flp, incomingp, contribp);
@@ -836,7 +832,7 @@ class SvaNfaLowering final {
             if (c.matchCondp) {
                 AstSampled* const sampp
                     = new AstSampled{c.flp, c.matchCondp->cloneTreePure(false)};
-                sampp->dtypeSetBit();
+                sampp->dtypeFrom(c.matchCondp);
                 matchedNowp = new AstAnd{c.flp, inWindowp, sampp};
             } else {  // LCOV_EXCL_LINE -- no counter-FSM caller leaves matchCondp null
                 matchedNowp = inWindowp;  // LCOV_EXCL_LINE
@@ -845,7 +841,6 @@ class SvaNfaLowering final {
             AstNodeExpr* const counterAtEndp
                 = new AstEq{c.flp, new AstVarRef{c.flp, cntp, VAccess::READ},
                             new AstConst{c.flp, AstConst::WidthedValue{}, 32, counterMax}};
-            counterAtEndp->dtypeSetBit();
 
             AstNodeExpr* const donep = new AstOr{c.flp, matchedNowp, counterAtEndp};
 
@@ -907,11 +902,9 @@ class SvaNfaLowering final {
             if (c.disableExprp) {
                 AstNodeExpr* const notDisLp
                     = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
-                notDisLp->dtypeSetBit();
                 gateLp = new AstAnd{c.flp, gateLp, notDisLp};
                 AstNodeExpr* const notDisRp
                     = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
-                notDisRp->dtypeSetBit();
                 gateRp = new AstAnd{c.flp, gateRp, notDisRp};
             }
             AstAssignDly* const setLp
@@ -957,7 +950,6 @@ class SvaNfaLowering final {
                     new AstVarRef{c.flp, c.vtx[fi]->datap()->counterCountVarp, VAccess::READ},
                     new AstConst{c.flp, AstConst::WidthedValue{}, 32,
                                  static_cast<uint32_t>(tep->fromVtxp()->m_counterMax)}};
-                atEndp->dtypeSetBit();
                 AstNodeExpr* const expireContribp = new AstAnd{c.flp, srcSigp, atEndp};
                 sigs.rejectBasep = orExprs(c.flp, sigs.rejectBasep, expireContribp);
             } else if (tep->fromVtxp()->m_isUnbounded || tep->fromVtxp()->m_isAndCombiner) {
@@ -991,12 +983,11 @@ class SvaNfaLowering final {
             AstNodeExpr* guardp = nullptr;
             for (AstNodeExpr* const cp : conds) {
                 AstSampled* const sp = new AstSampled{c.flp, cp->cloneTreePure(false)};
-                sp->dtypeSetBit();
+                sp->dtypeFrom(cp);
                 guardp
                     = guardp ? static_cast<AstNodeExpr*>(new AstAnd{c.flp, guardp, sp}) : sp;
             }
             AstNodeExpr* const notGuardp = new AstNot{c.flp, guardp};
-            notGuardp->dtypeSetBit();
             sigs.throughoutRejectp = orExprs(c.flp, sigs.throughoutRejectp,
                                              new AstAnd{c.flp, stateExprp, notGuardp});
         }
@@ -1012,7 +1003,6 @@ class SvaNfaLowering final {
             UASSERT_OBJ(c.disableCntVarp, c.senTreep, "snapshotVarp set without disableCntVarp");
             snapshotOkp = new AstEq{c.flp, new AstVarRef{c.flp, c.snapshotVarp, VAccess::READ},
                                     new AstVarRef{c.flp, c.disableCntVarp, VAccess::READ}};
-            snapshotOkp->dtypeSetBit();
         }
 
         computeTerminalMatchAndReject(c, snapshotOkp, sigs);
@@ -1027,7 +1017,6 @@ class SvaNfaLowering final {
                         "rejectOnFail Link must have condp and source stateSig");
             AstNodeExpr* const srcSigp = c.vtx[fi]->datap()->stateSigp->cloneTreePure(false);
             AstNodeExpr* const notCondp = new AstNot{c.flp, tep->m_condp->cloneTreePure(false)};
-            notCondp->dtypeSetBit();
             AstNodeExpr* const failp = new AstAnd{c.flp, srcSigp, notCondp};
             if (outRequiredStepSrcsp) {
                 outRequiredStepSrcsp->push_back(failp->cloneTreePure(false));
@@ -1053,13 +1042,11 @@ class SvaNfaLowering final {
             if (sigs.throughoutRejectp) {
                 AstNodeExpr* const notDisp
                     = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
-                notDisp->dtypeSetBit();
                 sigs.throughoutRejectp = new AstAnd{c.flp, sigs.throughoutRejectp, notDisp};
             }
             if (sigs.requiredStepRejectp) {
                 AstNodeExpr* const notDisp
                     = new AstNot{c.flp, c.disableExprp->cloneTreePure(false)};
-                notDisp->dtypeSetBit();
                 sigs.requiredStepRejectp = new AstAnd{c.flp, sigs.requiredStepRejectp, notDisp};
             }
         }
@@ -1158,7 +1145,6 @@ class SvaNfaLowering final {
                         = new AstSampled{flp, matchCondp->cloneTreePure(false)};
                     sampledCondp->dtypeFrom(matchCondp);
                     AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
-                    notCondp->dtypeSetBit();
                     negRejectp = new AstAnd{flp, rejectBasep, notCondp};
                 } else if (rejectBasep) {
                     rejectBasep->deleteTree();
@@ -1198,7 +1184,6 @@ class SvaNfaLowering final {
             if (rejectBasep) rejectBasep->deleteTree();
             if (requiredStepRejectp) requiredStepRejectp->deleteTree();
             AstNodeExpr* const resultExprp = new AstNot{flp, matchp};
-            resultExprp->dtypeSetBit();
             return resultExprp;
         }
         if (isCover) {
@@ -1226,8 +1211,8 @@ class SvaNfaLowering final {
         if (outMatchpp) {
             AstNodeExpr* matchExprp = terminalActivep->cloneTreePure(false);
             if (matchCondp) {
-                AstNodeExpr* const sp = new AstSampled{flp, matchCondp->cloneTreePure(false)};
-                sp->dtypeSetBit();
+                AstSampled* const sp = new AstSampled{flp, matchCondp->cloneTreePure(false)};
+                sp->dtypeFrom(matchCondp);
                 matchExprp = new AstAnd{flp, matchExprp, sp};
             }
             *outMatchpp = matchExprp;
@@ -1237,7 +1222,6 @@ class SvaNfaLowering final {
         if (requiredStepRejectp) rejectp = orExprs(flp, rejectp, requiredStepRejectp);
         if (!rejectp) return new AstConst{flp, AstConst::BitTrue{}};
         AstNodeExpr* const resultExprp = new AstNot{flp, rejectp};
-        resultExprp->dtypeSetBit();
         return resultExprp;
     }
 
