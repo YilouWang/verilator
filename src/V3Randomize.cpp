@@ -2587,15 +2587,14 @@ class ConstraintExprVisitor final : public VNVisitor {
                 FileLine* const fl = ifp->fileline();
                 // then branch: accumulated = outer && this.cond
                 AstNodeExpr* const thenCondp
-                    = outerCondp
-                          ? static_cast<AstNodeExpr*>(new AstLogAnd{
-                                fl, outerCondp->cloneTreePure(false),
-                                ifp->condp()->cloneTreePure(false)})
-                          : ifp->condp()->cloneTreePure(false);
+                    = outerCondp ? static_cast<AstNodeExpr*>(
+                                       new AstLogAnd{fl, outerCondp->cloneTreePure(false),
+                                                     ifp->condp()->cloneTreePure(false)})
+                                 : ifp->condp()->cloneTreePure(false);
                 if (AstNode* const thenHoistp
                     = extractConditionalDisableSofts(ifp->thensp(), thenCondp)) {
-                    hoistListp = hoistListp ? AstNode::addNext(hoistListp, thenHoistp)
-                                            : thenHoistp;
+                    hoistListp
+                        = hoistListp ? AstNode::addNext(hoistListp, thenHoistp) : thenHoistp;
                 }
                 VL_DO_DANGLING(thenCondp->deleteTree(), thenCondp);
                 if (ifp->elsesp()) {
@@ -2603,13 +2602,13 @@ class ConstraintExprVisitor final : public VNVisitor {
                     AstNodeExpr* const notInnerp
                         = new AstLogNot{fl, ifp->condp()->cloneTreePure(false)};
                     AstNodeExpr* const elseCondp
-                        = outerCondp ? static_cast<AstNodeExpr*>(
-                              new AstLogAnd{fl, outerCondp->cloneTreePure(false), notInnerp})
+                        = outerCondp ? static_cast<AstNodeExpr*>(new AstLogAnd{
+                                           fl, outerCondp->cloneTreePure(false), notInnerp})
                                      : notInnerp;
                     if (AstNode* const elseHoistp
                         = extractConditionalDisableSofts(ifp->elsesp(), elseCondp)) {
-                        hoistListp = hoistListp ? AstNode::addNext(hoistListp, elseHoistp)
-                                                : elseHoistp;
+                        hoistListp
+                            = hoistListp ? AstNode::addNext(hoistListp, elseHoistp) : elseHoistp;
                     }
                     VL_DO_DANGLING(elseCondp->deleteTree(), elseCondp);
                 }
@@ -2618,16 +2617,15 @@ class ConstraintExprVisitor final : public VNVisitor {
                     FileLine* const fl = exprp->fileline();
                     AstNode* const callStmtp = buildDisableSoftCallStmt(exprp);
                     if (callStmtp) {
-                        AstIf* const hoistIfp = new AstIf{
-                            fl, outerCondp->cloneTreePure(false), callStmtp, nullptr};
-                        hoistListp = hoistListp
-                                         ? AstNode::addNext(hoistListp,
-                                                            static_cast<AstNode*>(hoistIfp))
-                                         : static_cast<AstNode*>(hoistIfp);
+                        AstIf* const hoistIfp
+                            = new AstIf{fl, outerCondp->cloneTreePure(false), callStmtp, nullptr};
+                        hoistListp = hoistListp ? AstNode::addNext(hoistListp,
+                                                                   static_cast<AstNode*>(hoistIfp))
+                                                : static_cast<AstNode*>(hoistIfp);
                         // Replace in-tree disable-soft with a no-op boolean
                         // constraint so editSingle() folds cleanly.
-                        AstConstraintExpr* const truep = new AstConstraintExpr{
-                            fl, new AstConst{fl, AstConst::BitTrue{}}};
+                        AstConstraintExpr* const truep
+                            = new AstConstraintExpr{fl, new AstConst{fl, AstConst::BitTrue{}}};
                         exprp->replaceWith(truep);
                         VL_DO_DANGLING(exprp->deleteTree(), exprp);
                     }
