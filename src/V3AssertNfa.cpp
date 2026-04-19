@@ -272,6 +272,15 @@ class SvaNfaBuilder final {
         return sp;
     }
 
+    // True if exprp is a composite SVA construct (not a boolean leaf). Mirrors
+    // the set of node types dispatched by buildExpr().
+    static bool isSvaComposite(AstNodeExpr* exprp) {
+        return VN_IS(exprp, SExpr) || VN_IS(exprp, SAnd) || VN_IS(exprp, SOr)
+               || VN_IS(exprp, SConsRep) || VN_IS(exprp, SGotoRep)
+               || VN_IS(exprp, SThroughout) || VN_IS(exprp, SIntersect)
+               || VN_IS(exprp, SNonConsRep);
+    }
+
     // Create vertex and inherit throughout guards from current scope (IEEE 16.9.9).
     SvaStateVertex* scopedCreateVertex() {
         SvaStateVertex* const vtxp = m_graph.createStateVertex();
@@ -424,11 +433,7 @@ class SvaNfaBuilder final {
 
         // Multi-cycle RHS: recurse (only plain boolean is returned as finalCondp).
         AstNodeExpr* const exprp = sexprp->exprp();
-        if (VN_IS(exprp, SExpr) || VN_IS(exprp, SAnd) || VN_IS(exprp, SOr)
-            || VN_IS(exprp, SConsRep) || VN_IS(exprp, SGotoRep) || VN_IS(exprp, SThroughout)
-            || VN_IS(exprp, SIntersect) || VN_IS(exprp, SNonConsRep)) {
-            return buildExpr(exprp, currentp, isTopLevelStep);
-        }
+        if (isSvaComposite(exprp)) return buildExpr(exprp, currentp, isTopLevelStep);
         return {currentp, exprp, std::move(rangeMidSources)};
     }
 
@@ -437,9 +442,7 @@ class SvaNfaBuilder final {
         FileLine* const flp = repp->fileline();
         AstNodeExpr* const exprp = repp->exprp();
         // Multi-cycle expr in ConsRep not yet supported; bail to avoid invalid AST.
-        if (VN_IS(exprp, SExpr) || VN_IS(exprp, SThroughout) || VN_IS(exprp, SAnd)
-            || VN_IS(exprp, SOr) || VN_IS(exprp, SConsRep) || VN_IS(exprp, SGotoRep)
-            || VN_IS(exprp, SIntersect) || VN_IS(exprp, SNonConsRep)) {
+        if (isSvaComposite(exprp)) {
             repp->v3warn(E_UNSUPPORTED, "Unsupported: multi-cycle sequence expression inside"
                                         " consecutive repetition (IEEE 1800-2023 16.9.2)");
             return BuildResult::failWithError();
@@ -792,7 +795,10 @@ class SvaNfaLowering final {
 
         if (bodyp) {
             // Capture disableCnt in Phase-2 NBA before any reactive re-evaluation.
-            if (c.snapshotVarp && c.disableCntVarp) {
+            // snapshotVarp and disableCntVarp are allocated together.
+            if (c.snapshotVarp) {
+                UASSERT_OBJ(c.disableCntVarp, c.senTreep,
+                            "snapshotVarp set without disableCntVarp");
                 AstAssignDly* const snapAssignp
                     = new AstAssignDly{c.flp, new AstVarRef{c.flp, c.snapshotVarp, VAccess::WRITE},
                                        new AstVarRef{c.flp, c.disableCntVarp, VAccess::READ}};
@@ -882,10 +888,13 @@ class SvaNfaLowering final {
         // NBA semantics ensure doneL/doneR read pre-update values (IEEE 16.9.5).
         for (int ai = 0; ai < c.N; ++ai) {
             if (!c.doneLVars[ai]) continue;
+            // doneLVars is non-null only for AndCombiner vertices, which always
+            // have both m_andLhsTermp and m_andRhsTermp set at build time.
             const SvaStateVertex* const avp = c.vtx[ai];
-            const int l = avp->m_andLhsTermp ? avp->m_andLhsTermp->color() : -1;
-            const int r = avp->m_andRhsTermp ? avp->m_andRhsTermp->color() : -1;
-            if (l < 0 || r < 0) continue;
+            UASSERT_OBJ(avp->m_andLhsTermp && avp->m_andRhsTermp, avp,
+                        "AndCombiner vertex missing LHS/RHS terminal");
+            const int l = avp->m_andLhsTermp->color();
+            const int r = avp->m_andRhsTermp->color();
             if (!c.stateSig[l] || !c.stateSig[r] || !c.stateSig[ai]) continue;
 
             AstAssignDly* const clearLp
@@ -935,8 +944,11 @@ class SvaNfaLowering final {
         SignalSet sigs;
 
         // Snapshot comparison expression for disable-iff counter.
+        // snapshotVarp and disableCntVarp are allocated together.
         AstNodeExpr* snapshotOkp = nullptr;
-        if (c.snapshotVarp && c.disableCntVarp) {
+        if (c.snapshotVarp) {
+            UASSERT_OBJ(c.disableCntVarp, c.senTreep,
+                        "snapshotVarp set without disableCntVarp");
             snapshotOkp = new AstEq{c.flp, new AstVarRef{c.flp, c.snapshotVarp, VAccess::READ},
                                     new AstVarRef{c.flp, c.disableCntVarp, VAccess::READ}};
             snapshotOkp->dtypeSetBit();
@@ -1084,9 +1096,11 @@ class SvaNfaLowering final {
             for (int i = 0; i < c.N; ++i) {
                 if (!c.vtx[i]->m_isAndCombiner) continue;
                 if (c.stateSig[i]) continue;
-                const int l = c.vtx[i]->m_andLhsTermp ? c.vtx[i]->m_andLhsTermp->color() : -1;
-                const int r = c.vtx[i]->m_andRhsTermp ? c.vtx[i]->m_andRhsTermp->color() : -1;
-                if (l < 0 || r < 0) continue;
+                // AndCombiner vertices always have both terminal pointers set.
+                UASSERT_OBJ(c.vtx[i]->m_andLhsTermp && c.vtx[i]->m_andRhsTermp, c.vtx[i],
+                            "AndCombiner vertex missing LHS/RHS terminal");
+                const int l = c.vtx[i]->m_andLhsTermp->color();
+                const int r = c.vtx[i]->m_andRhsTermp->color();
                 if (!c.stateSig[l] || !c.stateSig[r]) continue;
                 AstNodeExpr* const matchLp
                     = buildMatchNow(c.flp, c.stateSig[l], c.vtx[i]->m_andLhsCondp);
