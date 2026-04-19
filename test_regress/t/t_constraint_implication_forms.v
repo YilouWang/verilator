@@ -44,6 +44,16 @@ class All;
     (mode == 4'd4) -> soft b == 4'hd;
   }
 
+  // Form 5b: expr -> disable soft var;  (parses and lowers without crash;
+  // the directive is meta-level so it cannot be applied conditionally on an
+  // SMT-evaluated term -- Verilator emits a CONSTRAINTIGN warning and drops
+  // the disable.  This test pins that non-crash degradation.)
+  /* verilator lint_off CONSTRAINTIGN */
+  constraint c_dis_soft {
+    (mode == 4'd7) -> disable soft b ;
+  }
+  /* verilator lint_on CONSTRAINTIGN */
+
   // Form 6: expr -> { brace block }
   constraint c_brace {
     (mode == 4'd5) -> { b == 4'h2; c == 4'h3; }
@@ -110,6 +120,15 @@ module t;
       ok = obj.randomize() with { mode == 4'd6; };
       `checkd(ok, 1);
       `checkh(obj.b, 4'h9);
+    end
+
+    // Form 5b: mode=7 exercises disable-soft-in-implication; with the
+    // directive dropped (per CONSTRAINTIGN), the surrounding soft constraint
+    // `soft b == 4'hd` remains active.  We just check randomize() succeeds --
+    // the disable being ignored means b is NOT forced, so b may be anything.
+    repeat (10) begin
+      ok = obj.randomize() with { mode == 4'd7; };
+      `checkd(ok, 1);
     end
 
     $write("*-* All Finished *-*\n");

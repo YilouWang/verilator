@@ -2143,6 +2143,29 @@ class ConstraintExprVisitor final : public VNVisitor {
         // referencing the specified variable. Pass the variable name directly
         // instead of going through SMT lowering.
         if (nodep->isDisableSoft()) {
+            if (m_wantSingle) {
+                // 'disable soft' is a meta-level directive on the constraint
+                // graph, not an SMT predicate. It cannot be applied conditionally
+                // on a surrounding constraint block (if / foreach / implication)
+                // because the enclosing condition is an SMT formula that is only
+                // resolved by the solver after the constraint graph is built.
+                // Warn and neutralize: referenced soft constraints remain active
+                // and the enclosing predicate is unchanged by contributing 1'b1
+                // to the editSingle() fold.
+                nodep->v3warn(
+                    CONSTRAINTIGN,
+                    "Unsupported: 'disable soft' inside conditional constraint body "
+                    "(if / foreach / implication); directive ignored, soft "
+                    "constraints on referenced variable remain active");
+                FileLine* const fl = nodep->fileline();
+                // AstConst with user1=false lets editFormat lower it to an SMT
+                // constant ("#b1"); setting user1 here would force a SMT visit
+                // path that has no handler for AstConst and hits an internal
+                // error.
+                nodep->replaceWith(new AstConst{fl, AstConst::BitTrue{}});
+                VL_DO_DANGLING(nodep->deleteTree(), nodep);
+                return;
+            }
             // Extract variable name from expression (VarRef or MemberSel)
             std::string varName;
             if (const AstNodeVarRef* const vrefp = VN_CAST(nodep->exprp(), NodeVarRef)) {
