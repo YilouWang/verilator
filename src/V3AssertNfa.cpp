@@ -885,9 +885,11 @@ class SvaNfaLowering final {
                         "AndCombiner vertex missing LHS/RHS terminal");
             const int l = avp->m_andLhsTermp->color();
             const int r = avp->m_andRhsTermp->color();
-            if (!c.vtx[l]->datap()->stateSigp || !c.vtx[r]->datap()->stateSigp
-                || !c.vtx[ai]->datap()->stateSigp)
-                continue;
+            // resolveLinks' 2*N+2 fixed-point pass is guaranteed to populate
+            // stateSigp on every AndCombiner and its LHS/RHS terminals.
+            UASSERT_OBJ(c.vtx[l]->datap()->stateSigp && c.vtx[r]->datap()->stateSigp
+                            && c.vtx[ai]->datap()->stateSigp,
+                        avp, "AndCombiner stateSigp chain unresolved after resolveLinks");
 
             AstAssignDly* const clearLp = new AstAssignDly{
                 c.flp, new AstVarRef{c.flp, c.vtx[ai]->datap()->doneLVarp, VAccess::WRITE},
@@ -1544,7 +1546,7 @@ class AssertNfaVisitor final : public VNVisitor {
     // Allocate disable-iff counter + snapshot vars and unlink the original
     // disable expression from the PropSpec. Returns {cntp, snapp} or
     // {nullptr, nullptr} if no counter is needed.
-    struct DisableVars {
+    struct DisableVars final {
         AstVar* cntp = nullptr;
         AstVar* snapp = nullptr;
     };
