@@ -276,9 +276,8 @@ class SvaNfaBuilder final {
     // the set of node types dispatched by buildExpr().
     static bool isSvaComposite(AstNodeExpr* exprp) {
         return VN_IS(exprp, SExpr) || VN_IS(exprp, SAnd) || VN_IS(exprp, SOr)
-               || VN_IS(exprp, SConsRep) || VN_IS(exprp, SGotoRep)
-               || VN_IS(exprp, SThroughout) || VN_IS(exprp, SIntersect)
-               || VN_IS(exprp, SNonConsRep);
+               || VN_IS(exprp, SConsRep) || VN_IS(exprp, SGotoRep) || VN_IS(exprp, SThroughout)
+               || VN_IS(exprp, SIntersect) || VN_IS(exprp, SNonConsRep);
     }
 
     // Create vertex and inherit throughout guards from current scope (IEEE 16.9.9).
@@ -947,8 +946,7 @@ class SvaNfaLowering final {
         // snapshotVarp and disableCntVarp are allocated together.
         AstNodeExpr* snapshotOkp = nullptr;
         if (c.snapshotVarp) {
-            UASSERT_OBJ(c.disableCntVarp, c.senTreep,
-                        "snapshotVarp set without disableCntVarp");
+            UASSERT_OBJ(c.disableCntVarp, c.senTreep, "snapshotVarp set without disableCntVarp");
             snapshotOkp = new AstEq{c.flp, new AstVarRef{c.flp, c.snapshotVarp, VAccess::READ},
                                     new AstVarRef{c.flp, c.disableCntVarp, VAccess::READ}};
             snapshotOkp->dtypeSetBit();
