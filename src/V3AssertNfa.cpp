@@ -81,9 +81,9 @@ public:
     explicit SvaStateVertex(V3Graph* graphp)
         : V3GraphVertex{graphp} {}
     ~SvaStateVertex() override {
-        for (AstNodeExpr* cp : m_throughoutConds) cp->deleteTree();
-        if (m_andLhsCondp) m_andLhsCondp->deleteTree();
-        if (m_andRhsCondp) m_andRhsCondp->deleteTree();
+        for (AstNodeExpr* cp : m_throughoutConds) VL_DO_DANGLING(cp->deleteTree(), cp);
+        if (m_andLhsCondp) VL_DO_DANGLING(m_andLhsCondp->deleteTree(), m_andLhsCondp);
+        if (m_andRhsCondp) VL_DO_DANGLING(m_andRhsCondp->deleteTree(), m_andRhsCondp);
     }
     // METHODS
     string name() const override { return "s" + cvtToStr(color()); }  // LCOV_EXCL_LINE
@@ -116,7 +116,7 @@ public:
         , m_condp{condp}
         , m_consumesCycle{consumesCycle} {}
     ~SvaTransEdge() override {
-        if (m_condp) m_condp->deleteTree();
+        if (m_condp) VL_DO_DANGLING(m_condp->deleteTree(), m_condp);
     }
     // METHODS
     // LCOV_EXCL_START -- Graphviz dump only
@@ -254,13 +254,10 @@ class SvaNfaBuilder final {
             return fixedLength(throughp->rhsp());
         }
         // LCOV_EXCL_START -- defensive: V3AssertPre rejects composite SVA ops
-        // (SAnd/SOr/SIntersect/SConsRep/SGotoRep) nested in an intersect arm
-        // before fixedLength runs (clock-context resolution fails). Kept as a
-        // guard in case future parser relaxations permit it.
-        if (VN_IS(nodep, SConsRep) || VN_IS(nodep, SGotoRep) || VN_IS(nodep, SAnd)
-            || VN_IS(nodep, SOr) || VN_IS(nodep, SIntersect)) {
-            return -1;
-        }
+        // nested in an intersect arm before fixedLength runs (clock-context
+        // resolution fails). Kept as a guard in case future parser relaxations
+        // permit it.
+        if (nodep->isMultiCycleSva()) return -1;
         // LCOV_EXCL_STOP
         // Plain boolean expression (no SVA constructs) -- 0 cycles.
         return 0;
@@ -310,6 +307,85 @@ class SvaNfaBuilder final {
 
     // Build NFA for an SExpr. finalCond = RHS (not yet added as a vertex).
     // isTopLevelStep: marks outermost required boolean check as rejectOnFail.
+    // Apply a range delay `##[M:N]` to currentp. Returns true on success. On
+    // failure, sets outErrorEmitted per semantic-error policy and returns false.
+    bool applyRangeDelay(AstDelay* delayp, AstNodeExpr* rhsExprp, SvaStateVertex*& currentp,
+                         std::vector<SvaStateVertex*>& midSources, FileLine* flp,
+                         bool& outErrorEmitted) {
+        const int minDelay = getConstInt(delayp->lhsp());
+        if (minDelay < 0) {
+            delayp->v3error("Range delay minimum is not a non-negative elaboration-time constant"
+                            " (IEEE 1800-2023 16.7)");
+            outErrorEmitted = true;
+            return false;
+        }
+        if (delayp->isUnbounded()) {
+            // `##[M:$]`: wait M cycles, then self-loop waiting for the match
+            // condition. Unbounded = liveness, so no reject.
+            currentp = addDelayChain(currentp, minDelay, flp);
+            guardedEdge(currentp, currentp, flp);
+            currentp->m_isUnbounded = true;
+            m_inUnboundedScope = true;
+            return true;
+        }
+        const int maxDelay = getConstInt(delayp->rhsp());
+        if (maxDelay < 0) {
+            delayp->v3error("Range delay maximum is not a non-negative elaboration-time constant"
+                            " (IEEE 1800-2023 16.7)");
+            outErrorEmitted = true;
+            return false;
+        }
+        if (maxDelay < minDelay) {
+            delayp->v3error("Range delay maximum must be >= minimum (IEEE 1800-2023 16.7)");
+            outErrorEmitted = true;
+            return false;
+        }
+        if (minDelay == maxDelay) {
+            currentp = addDelayChain(currentp, minDelay, flp);
+            return true;
+        }
+        const int range = maxDelay - minDelay;
+        currentp = addDelayChain(currentp, minDelay, flp);
+        // kChainLimit bounds per-attempt unrolled vertices. Above this, a
+        // counter FSM (constant-size state) is used instead, so the vertex
+        // count is O(1) in range regardless of user input; no adversarial N
+        // blowup is possible.
+        constexpr int kChainLimit = 256;
+        if (range > kChainLimit) {
+            // Large range: counter FSM. Overlapping triggers during an active
+            // count are dropped (non-overlapping semantics only).
+            SvaStateVertex* const counterVtxp = scopedCreateVertex();
+            counterVtxp->m_isCounter = true;
+            counterVtxp->m_counterMax = range;
+            guardedEdge(currentp, counterVtxp, flp);
+            currentp = counterVtxp;
+        } else if (VN_IS(rhsExprp, SExpr)) {
+            // Nested-SExpr RHS: merge all [M,N] positions; continuation is per-attempt.
+            SvaStateVertex* const mergeVtxp = scopedCreateVertex();
+            guardedLink(currentp, mergeVtxp, flp);
+            for (int i = 0; i < range; ++i) {
+                SvaStateVertex* const nextVtxp = scopedCreateVertex();
+                guardedEdge(currentp, nextVtxp, flp);
+                guardedLink(nextVtxp, mergeVtxp, flp);
+                currentp = nextVtxp;
+            }
+            currentp = mergeVtxp;
+        } else {
+            // Pure boolean RHS: register chain. Each mid-position links to
+            // match (match-only); last position is the reject source.
+            midSources.push_back(currentp);
+            for (int i = 0; i < range; ++i) {
+                SvaStateVertex* const nextVtxp = scopedCreateVertex();
+                AstNodeExpr* const notExprp
+                    = new AstNot{flp, sampled(rhsExprp->cloneTreePure(false))};
+                guardedEdge(currentp, nextVtxp, notExprp, flp);
+                if (i < range - 1) midSources.push_back(nextVtxp);
+                currentp = nextVtxp;
+            }
+        }
+        return true;
+    }
+
     BuildResult buildSExpr(AstSExpr* sexprp, SvaStateVertex* entryVtxp,
                            bool isTopLevelStep = false) {
         AstDelay* const delayp = VN_CAST(sexprp->delayp(), Delay);
@@ -339,79 +415,10 @@ class SvaNfaBuilder final {
         // Handle delay
         std::vector<SvaStateVertex*> rangeMidSources;
         if (delayp->isRangeDelay()) {
-            const int minDelay = getConstInt(delayp->lhsp());
-            if (minDelay < 0) {
-                delayp->v3error("Range delay minimum is not a non-negative"
-                                " elaboration-time constant"
-                                " (IEEE 1800-2023 16.7)");
-                return BuildResult::failWithError();
-            }
-
-            if (delayp->isUnbounded()) {
-                // `##[M:$]`: wait M cycles, then self-loop waiting for the
-                // match condition. Unbounded = liveness, so no reject.
-                currentp = addDelayChain(currentp, minDelay, flp);
-                guardedEdge(currentp, currentp, flp);
-                currentp->m_isUnbounded = true;
-                m_inUnboundedScope = true;
-            } else {
-                const int maxDelay = getConstInt(delayp->rhsp());
-                if (maxDelay < 0) {
-                    delayp->v3error("Range delay maximum is not a non-negative"
-                                    " elaboration-time constant"
-                                    " (IEEE 1800-2023 16.7)");
-                    return BuildResult::failWithError();
-                }
-                if (maxDelay < minDelay) {
-                    delayp->v3error("Range delay maximum must be >= minimum"
-                                    " (IEEE 1800-2023 16.7)");
-                    return BuildResult::failWithError();
-                }
-                if (minDelay == maxDelay) {
-                    currentp = addDelayChain(currentp, minDelay, flp);
-                } else {
-                    const int range = maxDelay - minDelay;
-                    currentp = addDelayChain(currentp, minDelay, flp);
-                    // kChainLimit bounds per-attempt unrolled vertices. Above this,
-                    // a counter FSM (constant-size state) is used instead, so the
-                    // vertex count is O(1) in range regardless of user input; no
-                    // adversarial N blowup is possible.
-                    constexpr int kChainLimit = 256;
-                    AstNodeExpr* const exprp = sexprp->exprp();
-                    const bool nestedRhs = VN_IS(exprp, SExpr);
-                    if (range > kChainLimit) {
-                        // Large range: counter FSM. Overlapping triggers during an
-                        // active count are dropped (non-overlapping semantics only).
-                        SvaStateVertex* const counterVtxp = scopedCreateVertex();
-                        counterVtxp->m_isCounter = true;
-                        counterVtxp->m_counterMax = range;
-                        guardedEdge(currentp, counterVtxp, flp);
-                        currentp = counterVtxp;
-                    } else if (nestedRhs) {
-                        // Merge all [M,N] positions; continuation is per-attempt.
-                        SvaStateVertex* const mergeVtxp = scopedCreateVertex();
-                        guardedLink(currentp, mergeVtxp, flp);
-                        for (int i = 0; i < range; ++i) {
-                            SvaStateVertex* const nextVtxp = scopedCreateVertex();
-                            guardedEdge(currentp, nextVtxp, flp);
-                            guardedLink(nextVtxp, mergeVtxp, flp);
-                            currentp = nextVtxp;
-                        }
-                        currentp = mergeVtxp;
-                    } else {
-                        // Pure boolean RHS: register chain. Each mid-position links
-                        // to match (match-only); last position is the reject source.
-                        rangeMidSources.push_back(currentp);
-                        for (int i = 0; i < range; ++i) {
-                            SvaStateVertex* const nextVtxp = scopedCreateVertex();
-                            AstNodeExpr* const notExprp
-                                = new AstNot{flp, sampled(exprp->cloneTreePure(false))};
-                            guardedEdge(currentp, nextVtxp, notExprp, flp);
-                            if (i < range - 1) rangeMidSources.push_back(nextVtxp);
-                            currentp = nextVtxp;
-                        }
-                    }
-                }
+            bool errorEmitted = false;
+            if (!applyRangeDelay(delayp, sexprp->exprp(), currentp, rangeMidSources, flp,
+                                 errorEmitted)) {
+                return BuildResult::fail(errorEmitted);
             }
         } else {
             const int delayCycles = getConstInt(delayp->lhsp());
@@ -736,10 +743,10 @@ class SvaNfaLowering final {
 
     // Phase 3 output signals
     struct SignalSet final {
-        AstNodeExpr* terminalActivep = nullptr;
-        AstNodeExpr* rejectBasep = nullptr;
-        AstNodeExpr* requiredStepRejectp = nullptr;
-        AstNodeExpr* throughoutRejectp = nullptr;
+        AstNodeExpr* terminalActivep = nullptr;  // OR of all successful terminal matches
+        AstNodeExpr* rejectBasep = nullptr;  // Reject when a terminal match fails
+        AstNodeExpr* requiredStepRejectp = nullptr;  // Per-source reject from rejectOnFail Links
+        AstNodeExpr* throughoutRejectp = nullptr;  // Reject when a throughout guard drops
     };
 
     // Phase 2/2b/2c: Emit NBA state-update always blocks for registered vertices,
@@ -1031,16 +1038,12 @@ class SvaNfaLowering final {
 
         computeThroughoutReject(c, sigs);
 
-        // Clean up intermediate state signals. These are orphan subtrees owned
-        // by stateSigp (never linked into the enclosing AST), so deleteTree()
-        // is the right API here -- pushDeletep would require a backp() link
-        // that orphan nodes do not have. Same rule applies to the other
-        // deleteTree() calls below and in destructors.
+        // Clean up intermediate state signals. These are orphan subtrees
+        // (never linked into the enclosing AST); deleteTree() is immediate
+        // which is what we want since stateSigp lifetime ends with this scope.
         for (int i = 0; i < c.N; ++i) {
-            if (c.vtx[i]->datap()->stateSigp) {
-                c.vtx[i]->datap()->stateSigp->deleteTree();
-                c.vtx[i]->datap()->stateSigp = nullptr;
-            }
+            AstNodeExpr*& sigp = c.vtx[i]->datap()->stateSigp;
+            if (sigp) VL_DO_DANGLING(sigp->deleteTree(), sigp);
         }
         // Disable iff gating on throughout/required-step rejects (IEEE 16.12).
         if (c.disableExprp) {
@@ -1057,11 +1060,11 @@ class SvaNfaLowering final {
         }
 
         if (snapshotOkp) {
-            snapshotOkp->deleteTree();
+            VL_DO_DANGLING(snapshotOkp->deleteTree(), snapshotOkp);
             snapshotOkp = nullptr;
         }
         if (c.disableExprp) {
-            c.disableExprp->deleteTree();
+            VL_DO_DANGLING(c.disableExprp->deleteTree(), c.disableExprp);
             c.disableExprp = nullptr;
         }
 
@@ -1132,7 +1135,7 @@ class SvaNfaLowering final {
                             = orExprs(c.flp, c.vtx[ti]->datap()->stateSigp, contributionp);
                         changed = true;
                     } else {
-                        contributionp->deleteTree();
+                        VL_DO_DANGLING(contributionp->deleteTree(), contributionp);
                     }
                 }
             }
@@ -1148,7 +1151,7 @@ class SvaNfaLowering final {
         // Property negation (IEEE 1800-2023 16.12.1 `not`): invert match/reject.
         if (negated) {
             if (isCover) {
-                if (terminalActivep) terminalActivep->deleteTree();
+                if (terminalActivep) VL_DO_DANGLING(terminalActivep->deleteTree(), terminalActivep);
                 AstNodeExpr* negRejectp = nullptr;
                 if (matchCondp && rejectBasep) {
                     AstNodeExpr* const sampledCondp
@@ -1157,7 +1160,7 @@ class SvaNfaLowering final {
                     AstNodeExpr* const notCondp = new AstNot{flp, sampledCondp};
                     negRejectp = new AstAnd{flp, rejectBasep, notCondp};
                 } else if (rejectBasep) {
-                    rejectBasep->deleteTree();
+                    VL_DO_DANGLING(rejectBasep->deleteTree(), rejectBasep);
                 }
                 if (throughoutRejectp) negRejectp = orExprs(flp, negRejectp, throughoutRejectp);
                 if (requiredStepRejectp)
@@ -1190,16 +1193,16 @@ class SvaNfaLowering final {
                         = orExprs(flp, notPMatchp, requiredStepRejectp->cloneTreePure(false));
                 *outMatchpp = notPMatchp;
             }
-            if (throughoutRejectp) throughoutRejectp->deleteTree();
-            if (rejectBasep) rejectBasep->deleteTree();
-            if (requiredStepRejectp) requiredStepRejectp->deleteTree();
+            if (throughoutRejectp) VL_DO_DANGLING(throughoutRejectp->deleteTree(), throughoutRejectp);
+            if (rejectBasep) VL_DO_DANGLING(rejectBasep->deleteTree(), rejectBasep);
+            if (requiredStepRejectp) VL_DO_DANGLING(requiredStepRejectp->deleteTree(), requiredStepRejectp);
             AstNodeExpr* const resultExprp = new AstNot{flp, matchp};
             return resultExprp;
         }
         if (isCover) {
-            if (throughoutRejectp) throughoutRejectp->deleteTree();
-            if (rejectBasep) rejectBasep->deleteTree();
-            if (requiredStepRejectp) requiredStepRejectp->deleteTree();
+            if (throughoutRejectp) VL_DO_DANGLING(throughoutRejectp->deleteTree(), throughoutRejectp);
+            if (rejectBasep) VL_DO_DANGLING(rejectBasep->deleteTree(), rejectBasep);
+            if (requiredStepRejectp) VL_DO_DANGLING(requiredStepRejectp->deleteTree(), requiredStepRejectp);
             if (matchCondp) {
                 AstNodeExpr* const sampledCondp
                     = new AstSampled{flp, matchCondp->cloneTreePure(false)};
@@ -1216,7 +1219,7 @@ class SvaNfaLowering final {
             sampledCondp->dtypeFrom(matchCondp);
             rejectp = new AstAnd{flp, rejectBasep, new AstNot{flp, sampledCondp}};
         } else if (rejectBasep) {
-            rejectBasep->deleteTree();
+            VL_DO_DANGLING(rejectBasep->deleteTree(), rejectBasep);
         }
         if (outMatchpp) {
             AstNodeExpr* matchExprp = terminalActivep->cloneTreePure(false);
@@ -1227,7 +1230,7 @@ class SvaNfaLowering final {
             }
             *outMatchpp = matchExprp;
         }
-        if (terminalActivep) terminalActivep->deleteTree();
+        if (terminalActivep) VL_DO_DANGLING(terminalActivep->deleteTree(), terminalActivep);
         if (throughoutRejectp) rejectp = orExprs(flp, rejectp, throughoutRejectp);
         if (requiredStepRejectp) rejectp = orExprs(flp, rejectp, requiredStepRejectp);
         if (!rejectp) return new AstConst{flp, AstConst::BitTrue{}};
@@ -1604,8 +1607,10 @@ class AssertNfaVisitor final : public VNVisitor {
         // without liveness. Reaching the antecedent terminal is a definitive event.
         SvaStateVertex* const trigVtxp = graph.createStateVertex();
         if (antResult.finalCondp) {
-            graph.addLink(antResult.termVertexp, trigVtxp,
-                          new AstSampled{flp, antResult.finalCondp->cloneTreePure(false)});
+            AstSampled* const sampp
+                = new AstSampled{flp, antResult.finalCondp->cloneTreePure(false)};
+            sampp->dtypeFrom(antResult.finalCondp);
+            graph.addLink(antResult.termVertexp, trigVtxp, sampp);
             if (!antResult.finalCondp->backp()) pushDeletep(antResult.finalCondp);
         } else {
             graph.addLink(antResult.termVertexp, trigVtxp);
