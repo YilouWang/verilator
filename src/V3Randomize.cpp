@@ -2152,11 +2152,10 @@ class ConstraintExprVisitor final : public VNVisitor {
                 // Warn and neutralize: referenced soft constraints remain active
                 // and the enclosing predicate is unchanged by contributing 1'b1
                 // to the editSingle() fold.
-                nodep->v3warn(
-                    CONSTRAINTIGN,
-                    "Unsupported: 'disable soft' inside conditional constraint body "
-                    "(if / foreach / implication); directive ignored, soft "
-                    "constraints on referenced variable remain active");
+                nodep->v3warn(CONSTRAINTIGN,
+                              "Unsupported: 'disable soft' inside conditional constraint body "
+                              "(if / foreach / implication); directive ignored, soft "
+                              "constraints on referenced variable remain active");
                 FileLine* const fl = nodep->fileline();
                 // AstConst with user1=false lets editFormat lower it to an SMT
                 // constant ("#b1"); setting user1 here would force a SMT visit
