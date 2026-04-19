@@ -5079,11 +5079,13 @@ expr<nodeExprp>:                // IEEE: part of expression/constant_expression/
         |       type_referenceEq yP_EQUAL type_referenceBoth         { $$ = new AstEqT{$2, $1, $3}; }
         |       type_referenceEq yP_NOTEQUAL type_referenceBoth      { $$ = new AstNeqT{$2, $1, $3}; }
         //                      // IEEE: expr yP_MINUSGT expr  (1800-2009)
-        //                      // Conflicts with constraint_expression:"expr yP_MINUSGT constraint_set"
-        //                      // To duplicating expr for constraints, just allow the more general form
-        //                      // Later Ast processing must ignore constraint terms where inappropriate
-        //UNSUP ~l~expr yP_MINUSGT constraint_set               { $<fl>$ = $<fl>1; $$ = $1 + $2 + $3; }
-        //UNSUP remove line below
+        //                      // The brace-block form of IEEE 1800-2023 18.7.2
+        //                      // (expr yP_MINUSGT '{' constraint_expressionList '}')
+        //                      // is handled by a dedicated production in
+        //                      // constraint_expression.  The single-non-expression
+        //                      // statement form (expr yP_MINUSGT if/foreach/unique/...)
+        //                      // remains unsupported because folding it here would
+        //                      // conflict with the active expr->expr rule below.
         |       ~l~expr yP_MINUSGT ~r~expr              { $$ = new AstLogIf{$2, $1, $3}; }
         //
         //                      // <= is special, as we need to disambiguate it with <= assignment
@@ -7904,8 +7906,14 @@ constraint_expression<nodep>:  // ==IEEE: constraint_expression
         |       yUNIQUE '{' range_list '}' ';'
                         { $$ = new AstConstraintUnique{$1, $3}; }
         //                      // IEEE: expr yP_MINUSGT constraint_set
-        //                      // Conflicts with expr:"expr yP_MINUSGT expr"; rule moved there
-        //
+        //                      // The single-expression form "expr -> expr ;" is parsed
+        //                      // via the general expr rule (-> AstLogIf) and reaches
+        //                      // here through "expr ';'" above.  The brace-block form
+        //                      // "expr -> { ... }" is handled by the dedicated rule
+        //                      // below and produces an AstConstraintIf identical to
+        //                      // the existing "if (expr) constraint_set" path.
+        |       expr yP_MINUSGT '{' constraint_expressionList '}'
+                        { $$ = new AstConstraintIf{$<fl>2, $1, $4, nullptr}; }
         |       yIF '(' expr ')' constraint_set %prec prLOWER_THAN_ELSE
                         { $$ = new AstConstraintIf{$1, $3, $5, nullptr}; }
         |       yIF '(' expr ')' constraint_set yELSE constraint_set
