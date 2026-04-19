@@ -7906,14 +7906,35 @@ constraint_expression<nodep>:  // ==IEEE: constraint_expression
         |       yUNIQUE '{' range_list '}' ';'
                         { $$ = new AstConstraintUnique{$1, $3}; }
         //                      // IEEE: expr yP_MINUSGT constraint_set
-        //                      // The single-expression form "expr -> expr ;" is parsed
-        //                      // via the general expr rule (-> AstLogIf) and reaches
-        //                      // here through "expr ';'" above.  The brace-block form
-        //                      // "expr -> { ... }" is handled by the dedicated rule
-        //                      // below and produces an AstConstraintIf identical to
-        //                      // the existing "if (expr) constraint_set" path.
+        //                      // The single-expression "expr -> expr ;" is parsed via
+        //                      // the general expr rule (-> AstLogIf) and reaches here
+        //                      // through "expr ';'" above.  All non-expression RHS
+        //                      // shapes IEEE allows under constraint_set are enumerated
+        //                      // explicitly below.  Each builds an outer AstConstraintIf
+        //                      // (cond=lhs, then=inner_stmt, else=nullptr) that V3Randomize
+        //                      // already lowers identically to the "if (expr) ..." path.
         |       expr yP_MINUSGT '{' constraint_expressionList '}'
-                        { $$ = new AstConstraintIf{$<fl>2, $1, $4, nullptr}; }
+                        { $$ = new AstConstraintIf{$2, $1, $4, nullptr}; }
+        |       expr yP_MINUSGT yIF '(' expr ')' constraint_set %prec prLOWER_THAN_ELSE
+                        { $$ = new AstConstraintIf{$2, $1,
+                                   new AstConstraintIf{$3, $5, $7, nullptr}, nullptr}; }
+        |       expr yP_MINUSGT yIF '(' expr ')' constraint_set yELSE constraint_set
+                        { $$ = new AstConstraintIf{$2, $1,
+                                   new AstConstraintIf{$3, $5, $7, $9}, nullptr}; }
+        |       expr yP_MINUSGT yFOREACH '(' idClassSelForeach ')' constraint_set
+                        { $$ = new AstConstraintIf{$2, $1,
+                                   new AstConstraintForeach{$3, $5, $7}, nullptr}; }
+        |       expr yP_MINUSGT yUNIQUE '{' range_list '}' ';'
+                        { $$ = new AstConstraintIf{$2, $1,
+                                   new AstConstraintUnique{$3, $5}, nullptr}; }
+        |       expr yP_MINUSGT ySOFT expr ';'
+                        { AstConstraintExpr* const innerp = new AstConstraintExpr{$3, $4};
+                          innerp->isSoft(true);
+                          $$ = new AstConstraintIf{$2, $1, innerp, nullptr}; }
+        |       expr yP_MINUSGT yDISABLE ySOFT expr/*constraint_primary*/ ';'
+                        { AstConstraintExpr* const innerp = new AstConstraintExpr{$3, $5};
+                          innerp->isDisableSoft(true);
+                          $$ = new AstConstraintIf{$2, $1, innerp, nullptr}; }
         |       yIF '(' expr ')' constraint_set %prec prLOWER_THAN_ELSE
                         { $$ = new AstConstraintIf{$1, $3, $5, nullptr}; }
         |       yIF '(' expr ')' constraint_set yELSE constraint_set
