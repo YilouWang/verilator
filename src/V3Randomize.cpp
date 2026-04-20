@@ -2607,9 +2607,9 @@ class ConstraintExprVisitor final : public VNVisitor {
                     FileLine* const fl = exprp->fileline();
                     AstIf* const hoistIfp = new AstIf{fl, outerCondp->cloneTreePure(false),
                                                       buildDisableSoftCallStmt(exprp), nullptr};
-                    hoistListp = hoistListp
-                                     ? AstNode::addNext(hoistListp, static_cast<AstNode*>(hoistIfp))
-                                     : static_cast<AstNode*>(hoistIfp);
+                    hoistListp = hoistListp ? AstNode::addNext(hoistListp,
+                                                               static_cast<AstNode*>(hoistIfp))
+                                            : static_cast<AstNode*>(hoistIfp);
                     // Replace in-tree disable-soft with a no-op boolean
                     // constraint so editSingle() folds cleanly.
                     AstConstraintExpr* const truep
