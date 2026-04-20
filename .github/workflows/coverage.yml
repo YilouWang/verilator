@@ -104,6 +104,8 @@ jobs:
     name: Prepare HTML report
     needs: [build, test]
     if: ${{ contains(needs.*.result, 'success') && !cancelled() }}
+    permissions:
+      contents: write  # fork-local: needed to push verilator.info to the coverage-data branch
     runs-on: ubuntu-24.04
     steps:
       - name: Install dependencies
@@ -146,6 +148,8 @@ jobs:
           else
             make coverage-report
           fi
+          # fork-local: stash the combined lcov trace before rm, so a later step can publish it
+          cp obj_coverage/verilator.info /tmp/verilator.info || true
           # Remove data files
           rm -f obj_coverage/verilator*.info
           # Some extra work for PRs only
@@ -181,6 +185,46 @@ jobs:
         with:
           path: repo/notification
           name: coverage-pr-notification
+
+      # fork-local: publish the raw lcov trace to the coverage-data branch so that
+      # it can be fetched via a stable raw-content URL:
+      #   https://raw.githubusercontent.com/YilouWang/verilator/coverage-data/pr-<N>.info
+      # Never runs on upstream (guarded by repository check).
+      - name: Publish lcov info to coverage-data branch
+        if: ${{ github.event_name == 'pull_request' && github.repository == 'YilouWang/verilator' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ ! -f /tmp/verilator.info ]; then
+            echo "::warning::/tmp/verilator.info missing, skipping publish"
+            exit 0
+          fi
+          mkdir -p /tmp/cov-repo
+          cd /tmp/cov-repo
+          git init -q
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git config user.email "ci@github.com"
+          git config user.name "CI Bot"
+          if git fetch --depth 1 origin coverage-data 2>/dev/null; then
+            git checkout coverage-data
+            find . -maxdepth 1 -type f \( -name "*.info" -o -name "METADATA" \) -delete
+          else
+            git checkout --orphan coverage-data
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+          cp /tmp/verilator.info "pr-${{ github.event.number }}.info"
+          cp /tmp/verilator.info "latest.info"
+          cat > METADATA <<EOF
+          run_id: ${{ github.run_id }}
+          pr: ${{ github.event.number }}
+          head_sha: ${{ github.event.pull_request.head.sha }}
+          base_sha: ${{ github.event.pull_request.base.sha }}
+          timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+          git add .
+          git commit -m "coverage for PR #${{ github.event.number }} run ${{ github.run_id }}"
+          git push -f origin coverage-data
 
   # Create GitHub issue for failed scheduled jobs
   # This should always be the last job (we want an issue if anything breaks)
