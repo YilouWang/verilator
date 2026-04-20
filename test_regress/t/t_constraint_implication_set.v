@@ -94,16 +94,21 @@ class DisSoft;
   }
 endclass
 
-// MemberSel target for `disable soft` (this.x is parsed as AstMemberSel
-// rather than AstVarRef).  Same conditional semantics as DisSoft above.
+// MemberSel target for `disable soft`.  Cross-object reference (inner.y)
+// parses as AstMemberSel; disable-soft must extract the variable name from
+// that node shape too.
+class Inner;
+  rand bit [3:0] y;
+endclass
 class DisSoftMember;
   bit override_flag;
-  rand bit [3:0] x;
-  constraint c_soft_x { soft this.x == 4'h5; }
+  rand Inner inner;
+  constraint c_soft_y { soft inner.y == 4'h5; }
   constraint c_override {
-    (override_flag == 1'b1) -> disable soft this.x ;
-    (override_flag == 1'b1) -> this.x == 4'hc ;
+    (override_flag == 1'b1) -> disable soft inner.y ;
+    (override_flag == 1'b1) -> inner.y == 4'hc ;
   }
+  function new(); inner = new(); endfunction
 endclass
 
 // `disable soft` in BOTH then and else arms of a single if.  Exercises the
@@ -215,13 +220,13 @@ module t;
       repeat (10) begin
         ok = dsm.randomize();
         `checkd(ok, 1);
-        `checkh(dsm.x, 4'h5);
+        `checkh(dsm.inner.y, 4'h5);
       end
       dsm.override_flag = 1'b1;
       repeat (10) begin
         ok = dsm.randomize();
         `checkd(ok, 1);
-        `checkh(dsm.x, 4'hc);
+        `checkh(dsm.inner.y, 4'hc);
       end
     end
 
