@@ -33,7 +33,7 @@ jobs:
     if: |
       github.repository == 'YilouWang/verilator' &&
       github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'success'
+      github.event.workflow_run.conclusion != 'cancelled'
     runs-on: ubuntu-24.04
     steps:
       - name: Download lcov-info artifact from triggering run
