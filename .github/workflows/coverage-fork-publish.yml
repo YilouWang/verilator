@@ -1,0 +1,101 @@
+---
+# DESCRIPTION: Fork-local — publish lcov .info from a Code coverage run
+# to a stable coverage-data branch so external tooling can fetch it via raw URL.
+#
+# Triggered after "Code coverage" completes. Runs in BASE-REPO context with the
+# workflow file from the default branch, so cross-fork PRs do not block writes
+# (unlike the pull_request-triggered Code coverage workflow itself).
+#
+# SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
+
+name: Coverage publish (fork)
+
+on:
+  workflow_run:
+    workflows: [Code coverage]
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: coverage-fork-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Push lcov info to coverage-data branch
+    if: |
+      github.repository == 'YilouWang/verilator' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download lcov-info artifact from triggering run
+        uses: actions/download-artifact@v8
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: lcov-info
+          path: /tmp/lcov
+
+      - name: Verify artifact contents
+        id: meta
+        run: |
+          set -euo pipefail
+          ls -la /tmp/lcov
+          if [ ! -f /tmp/lcov/verilator.info ]; then
+            echo "::error::lcov-info artifact missing verilator.info"
+            exit 1
+          fi
+          if [ ! -f /tmp/lcov/pr-number.txt ]; then
+            echo "::error::lcov-info artifact missing pr-number.txt"
+            exit 1
+          fi
+          PR=$(cat /tmp/lcov/pr-number.txt | tr -d '[:space:]')
+          if [ -z "$PR" ]; then
+            echo "::error::pr-number.txt is empty"
+            exit 1
+          fi
+          echo "pr=${PR}" >> "$GITHUB_OUTPUT"
+          echo "Found PR #${PR}, lcov size: $(wc -l < /tmp/lcov/verilator.info) lines"
+
+      - name: Push to coverage-data branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.meta.outputs.pr }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |-
+          set -euo pipefail
+          mkdir -p /tmp/cov-repo
+          cd /tmp/cov-repo
+          git init -q
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git config user.email "ci@github.com"
+          git config user.name "CI Bot"
+          if git fetch --depth 1 origin coverage-data 2>/dev/null; then
+            git checkout coverage-data
+            find . -maxdepth 1 -type f \( -name "*.info" -o -name "METADATA" \) -delete
+          else
+            git checkout --orphan coverage-data
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+          cp /tmp/lcov/verilator.info "pr-${PR}.info"
+          cp /tmp/lcov/verilator.info "latest.info"
+          {
+            echo "run_id: ${RUN_ID}"
+            echo "pr: ${PR}"
+            echo "head_sha: ${HEAD_SHA}"
+            cat /tmp/lcov/PR_META 2>/dev/null || true
+            echo "timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > METADATA
+          git add .
+          git commit -m "coverage for PR #${PR} run ${RUN_ID}"
+          git push -f origin coverage-data
+          echo "Published: https://raw.githubusercontent.com/${{ github.repository }}/coverage-data/pr-${PR}.info"

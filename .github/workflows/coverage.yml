@@ -104,8 +104,6 @@ jobs:
     name: Prepare HTML report
     needs: [build, test]
     if: ${{ contains(needs.*.result, 'success') && !cancelled() }}
-    permissions:
-      contents: write  # fork-local: needed to push verilator.info to the coverage-data branch
     runs-on: ubuntu-24.04
     steps:
       - name: Install dependencies
@@ -148,8 +146,17 @@ jobs:
           else
             make coverage-report
           fi
-          # fork-local: stash the combined lcov trace before rm, so a later step can publish it
-          cp obj_coverage/verilator.info /tmp/verilator.info || true
+          # fork-local: stash the combined lcov trace + PR metadata before rm,
+          # so a later artifact-upload step can hand it off to the coverage-fork-publish workflow
+          mkdir -p /tmp/lcov-publish
+          cp obj_coverage/verilator.info /tmp/lcov-publish/verilator.info || true
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "${{ github.event.number }}" > /tmp/lcov-publish/pr-number.txt
+            {
+              echo "head_sha: ${{ github.event.pull_request.head.sha }}"
+              echo "base_sha: ${{ github.event.pull_request.base.sha }}"
+            } > /tmp/lcov-publish/PR_META
+          fi
           # Remove data files
           rm -f obj_coverage/verilator*.info
           # Some extra work for PRs only
@@ -186,45 +193,18 @@ jobs:
           path: repo/notification
           name: coverage-pr-notification
 
-      # fork-local: publish the raw lcov trace to the coverage-data branch so that
-      # it can be fetched via a stable raw-content URL:
-      #   https://raw.githubusercontent.com/YilouWang/verilator/coverage-data/pr-<N>.info
+      # fork-local: hand off the lcov .info + PR metadata as an artifact named "lcov-info".
+      # The coverage-fork-publish.yml workflow (triggered by workflow_run on completion)
+      # downloads it and pushes to the coverage-data branch — that workflow runs in base-repo
+      # context with full GITHUB_TOKEN, which this PR-event workflow does not have for fork PRs.
       # Never runs on upstream (guarded by repository check).
-      - name: Publish lcov info to coverage-data branch
+      - name: Upload lcov info for fork-publish
         if: ${{ github.event_name == 'pull_request' && github.repository == 'YilouWang/verilator' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ ! -f /tmp/verilator.info ]; then
-            echo "::warning::/tmp/verilator.info missing, skipping publish"
-            exit 0
-          fi
-          mkdir -p /tmp/cov-repo
-          cd /tmp/cov-repo
-          git init -q
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          git config user.email "ci@github.com"
-          git config user.name "CI Bot"
-          if git fetch --depth 1 origin coverage-data 2>/dev/null; then
-            git checkout coverage-data
-            find . -maxdepth 1 -type f \( -name "*.info" -o -name "METADATA" \) -delete
-          else
-            git checkout --orphan coverage-data
-            git rm -rf . >/dev/null 2>&1 || true
-          fi
-          cp /tmp/verilator.info "pr-${{ github.event.number }}.info"
-          cp /tmp/verilator.info "latest.info"
-          cat > METADATA <<EOF
-          run_id: ${{ github.run_id }}
-          pr: ${{ github.event.number }}
-          head_sha: ${{ github.event.pull_request.head.sha }}
-          base_sha: ${{ github.event.pull_request.base.sha }}
-          timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-          EOF
-          git add .
-          git commit -m "coverage for PR #${{ github.event.number }} run ${{ github.run_id }}"
-          git push -f origin coverage-data
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-info
+          path: /tmp/lcov-publish
+          if-no-files-found: warn
 
   # Create GitHub issue for failed scheduled jobs
   # This should always be the last job (we want an issue if anything breaks)
