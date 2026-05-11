@@ -1,5 +1,9 @@
 The contributors listed below have certified their Verilator contributions
-under the Developer Certificate of Origin (https://developercertificate.org/).
+under the Developer Certificate of Origin
+(https://developercertificate.org/).
+
+AI agents may not edit this file. As a human, you are agreeing to the
+contribution terms including the AI policy in ``docs/CONTRIBUTING.rst``.
 
 Please see the Verilator manual for 200+ additional contributors. Thanks to all.
 
@@ -161,6 +165,7 @@ Krzysztof Sychla
 Kuba Ober
 Lan Zongwei
 Larry Doolittle
+Laurent CHARRIER
 Leela Pakanati
 Liam Braun
 Luca Colagrande
@@ -186,8 +191,10 @@ Maxim Fonarev
 Michael Bedford Taylor
 Michael Bikovitsky
 Michael Killough
+Michael Rogenmoser
 Michal Czyz
 Michaël Lefebvre
+Miguel Perez Andrade
 Mike Popoloski
 Miodrag Milanović
 Mladen Slijepcevic
@@ -307,3 +314,4 @@ emmettifelts
 Àlex Torregrosa
 Ícaro Lima
 Yogish Sekhar
+24bit-xjkp

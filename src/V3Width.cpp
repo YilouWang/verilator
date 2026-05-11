@@ -1728,6 +1728,18 @@ class WidthVisitor final : public VNVisitor {
             if (nodep->seedp()) iterateCheckSigned32(nodep, "seed", nodep->seedp(), BOTH);
         }
     }
+    void visit(AstSEventually* nodep) override {
+        if (v3Global.opt.timing().isSetFalse() || !v3Global.opt.timing().isSetTrue()) {
+            nodep->v3warn(E_NOTIMING, "s_eventually requires --timing");
+            nodep->replaceWith(new AstConst{nodep->fileline(), AstConst::WidthedValue{}, 1, 0});
+            VL_DO_DANGLING(nodep->deleteTree(), nodep);
+            return;
+        }
+        if (m_vup->prelim()) {
+            iterateCheckBool(nodep, "exprp", nodep->exprp(), BOTH);
+            nodep->dtypeSetBit();
+        }
+    }
     void visit(AstSGotoRep* nodep) override {
         assertAtExpr(nodep);
         if (m_vup->prelim()) {
@@ -6294,6 +6306,12 @@ class WidthVisitor final : public VNVisitor {
         UASSERT_OBJ(nodep->lhsp()->dtypep()->widthSized(), nodep, "How can LValue be unsized?");
         checkForceReleaseLhs(nodep, nodep->lhsp());
     }
+    void visit(AstDeassign* nodep) override {
+        userIterateAndNext(nodep->lhsp(), WidthVP{SELF, BOTH}.p());
+        UASSERT_OBJ(nodep->lhsp()->dtypep(), nodep, "L-value is untyped");
+        UASSERT_OBJ(nodep->lhsp()->dtypep()->widthSized(), nodep, "L-value width is unsized");
+        checkForceReleaseLhs(nodep, nodep->lhsp());
+    }
 
     static bool isFormatNonNumericArg(const AstNodeDType* dtypep) {
         dtypep = dtypep->skipRefp();
@@ -7646,7 +7664,7 @@ class WidthVisitor final : public VNVisitor {
         }
     }
 
-    void visit_log_not(AstNode* nodep) {
+    void visit_log_not(AstLogNot* nodep) {
         // CALLER: LogNot
         // Width-check: lhs 1 bit
         // Real: Allowed; implicitly compares with zero
@@ -7662,7 +7680,10 @@ class WidthVisitor final : public VNVisitor {
         if (m_vup->prelim()) {
             iterateCheckBool(nodep, "LHS", nodep->op1p(), BOTH);
             nodep->dtypeSetBit();
-            if (m_underSExpr) {
+            // IEEE 1800-2023 16.12.3: property 'not' is not a sequence operator.
+            // Boolean '!' is allowed in sequences (16.7 expression_or_dist).
+            // The parser distinguishes the two via AstLogNot::fromProperty().
+            if (m_underSExpr && nodep->fromProperty()) {
                 nodep->v3error("Unexpected 'not' in sequence expression context");
                 AstConst* const newp = new AstConst{nodep->fileline(), 0};
                 newp->dtypeFrom(nodep);
