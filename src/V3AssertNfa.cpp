@@ -1905,6 +1905,102 @@ class AssertNfaVisitor final : public VNVisitor {
         for (AstNodeExpr* const srcp : requiredStepSrcs) pushDeletep(srcp);
     }
 
+    // Recursively walk a consequent. Returns cycle length consumed and
+    // substitutes each VarRef to a captured local var with $past(rhs, K)
+    // (or rhs inline when K == 0). Reports E_UNSUPPORTED on non-constant
+    // delays or composite sequence operators.
+    int walkSubstituteMatchItems(
+        AstNodeExpr* nodep, int K,
+        const std::unordered_map<const AstVar*, AstNodeExpr*>& matchItems,
+        bool& errorEmitted) {
+        if (errorEmitted) return -1;
+        if (AstSExpr* const sexprp = VN_CAST(nodep, SExpr)) {
+            AstDelay* const delayp = VN_CAST(sexprp->delayp(), Delay);
+            if (!delayp || !delayp->isCycleDelay() || delayp->isRangeDelay()
+                || !VN_IS(delayp->lhsp(), Const)) {
+                sexprp->v3warn(E_UNSUPPORTED,
+                               "Unsupported: property local variable used across "
+                               "non-constant cycle delay in consequent"
+                               " (IEEE 1800-2023 16.10)");
+                errorEmitted = true;
+                return -1;
+            }
+            const int delayCycles = VN_AS(delayp->lhsp(), Const)->toSInt();
+            int preLen = 0;
+            if (AstNodeExpr* const prep = sexprp->preExprp()) {
+                preLen = walkSubstituteMatchItems(prep, K, matchItems, errorEmitted);
+                if (errorEmitted) return -1;
+            }
+            const int bodyLen = walkSubstituteMatchItems(
+                sexprp->exprp(), K + preLen + delayCycles, matchItems, errorEmitted);
+            if (errorEmitted) return -1;
+            return preLen + delayCycles + bodyLen;
+        }
+        if (nodep->isMultiCycleSva()) {
+            nodep->v3warn(E_UNSUPPORTED,
+                          "Unsupported: property local variable used across "
+                          "composite sequence operator in consequent"
+                          " (IEEE 1800-2023 16.10)");
+            errorEmitted = true;
+            return -1;
+        }
+        nodep->foreach([&](AstVarRef* refp) {
+            const auto it = matchItems.find(refp->varp());
+            if (it == matchItems.end()) return;
+            FileLine* const rflp = refp->fileline();
+            AstNodeExpr* newp;
+            if (K == 0) {
+                newp = it->second->cloneTreePure(false);
+            } else {
+                AstNodeExpr* const valp = it->second->cloneTreePure(false);
+                AstConst* const ticksp = new AstConst{
+                    rflp, AstConst::WidthedValue{}, 32, static_cast<uint32_t>(K)};
+                AstPast* const pastp = new AstPast{rflp, valp, ticksp};
+                pastp->dtypeFrom(valp);
+                newp = pastp;
+            }
+            refp->replaceWith(newp);
+            VL_DO_DANGLING(pushDeletep(refp), refp);
+        });
+        return 0;
+    }
+
+    // Lower property-local match-item assignments before NFA construction.
+    // Without this, the antecedent's AstExprStmt(<x = rhs_expr>, antBool)
+    // survives into every NFA edge as a continuous-alias side-effect, so the
+    // local-var temp tracks the current cycle's rhs_expr rather than the
+    // antecedent-match cycle's value -- wrong for `|-> ##N` and `|=> ##N`
+    // with N > 0 (issue #7587). Each consequent reference to the local var
+    // is replaced with `$past(rhs_expr, K)` where K = (overlapped ? 0 : 1)
+    // plus any accumulated `##N` delay. Returns true if E_UNSUPPORTED was
+    // emitted; caller must replace the body with BitFalse and bail.
+    bool liftMatchItemSubstitutions(PropertyParts& parts, AstNodeExpr* seqBodyp) {
+        if (!parts.hasImplication) return false;
+        AstExprStmt* const exprStmtp = VN_CAST(parts.triggerExprp, ExprStmt);
+        if (!exprStmtp) return false;
+        std::unordered_map<const AstVar*, AstNodeExpr*> matchItems;
+        for (AstNode* stmtp = exprStmtp->stmtsp(); stmtp; stmtp = stmtp->nextp()) {
+            AstAssign* const assignp = VN_CAST(stmtp, Assign);
+            if (!assignp) continue;
+            // V3LinkParse only emits VarRef LHS for property match items.
+            AstVarRef* const lhsRefp = VN_AS(assignp->lhsp(), VarRef);
+            matchItems[lhsRefp->varp()] = assignp->rhsp();
+        }
+        if (matchItems.empty()) return false;
+        const int startK = parts.isOverlapped ? 0 : 1;
+        bool errorEmitted = false;
+        walkSubstituteMatchItems(seqBodyp, startK, matchItems, errorEmitted);
+        // Match-item substitution / strip mutates ancestor purity. Release
+        // builds don't auto-clear caches on edits, so refresh here.
+        VIsCached::clearCacheTree();
+        if (errorEmitted) return true;
+        AstNodeExpr* const antBoolp = exprStmtp->resultp()->unlinkFrBack();
+        exprStmtp->replaceWith(antBoolp);
+        VL_DO_DANGLING(pushDeletep(exprStmtp), exprStmtp);
+        parts.triggerExprp = antBoolp;
+        return false;
+    }
+
     void processAssertion(AstNodeCoverOrAssert* assertp) {
         if (assertp->immediate()) return;
 
@@ -1921,7 +2017,7 @@ class AssertNfaVisitor final : public VNVisitor {
         AstNode* const propp = assertp->propp();
         if (!hasMultiCycleExpr(propp)) return;
 
-        const PropertyParts parts = decomposeProperty(propp);
+        PropertyParts parts = decomposeProperty(propp);
         UASSERT_OBJ(parts.seqExprp, propp, "Property body must be an expression");
 
         // Unwrap `not` (IEEE 1800-2023 16.12.1); odd count -> negated semantics.
@@ -1930,6 +2026,15 @@ class AssertNfaVisitor final : public VNVisitor {
         while (AstLogNot* const notp = VN_CAST(seqBodyp, LogNot)) {
             negated = !negated;
             seqBodyp = notp->lhsp();
+        }
+
+        // Substitute property-local match-item refs in consequent with
+        // $past(rhs, K) before NFA build (IEEE 1800-2023 16.10).
+        if (liftMatchItemSubstitutions(parts, seqBodyp)) {
+            AstPropSpec* const psp = VN_CAST(assertp->propp(), PropSpec);
+            UASSERT_OBJ(psp, assertp, "Concurrent assertion must have PropSpec");
+            replaceBodyOnBuildError(assertp->fileline(), psp, /*errorEmitted=*/true);
+            return;
         }
 
         AstSenTree* senTreep = assertp->sentreep();
