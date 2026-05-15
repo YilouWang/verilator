@@ -1909,19 +1909,17 @@ class AssertNfaVisitor final : public VNVisitor {
     // substitutes each VarRef to a captured local var with $past(rhs, K)
     // (or rhs inline when K == 0). Reports E_UNSUPPORTED on non-constant
     // delays or composite sequence operators.
-    int walkSubstituteMatchItems(
-        AstNodeExpr* nodep, int K,
-        const std::unordered_map<const AstVar*, AstNodeExpr*>& matchItems,
-        bool& errorEmitted) {
+    int walkSubstituteMatchItems(AstNodeExpr* nodep, int K,
+                                 const std::unordered_map<const AstVar*, AstNodeExpr*>& matchItems,
+                                 bool& errorEmitted) {
         if (errorEmitted) return -1;
         if (AstSExpr* const sexprp = VN_CAST(nodep, SExpr)) {
             AstDelay* const delayp = VN_CAST(sexprp->delayp(), Delay);
             if (!delayp || !delayp->isCycleDelay() || delayp->isRangeDelay()
                 || !VN_IS(delayp->lhsp(), Const)) {
-                sexprp->v3warn(E_UNSUPPORTED,
-                               "Unsupported: property local variable used across "
-                               "non-constant cycle delay in consequent"
-                               " (IEEE 1800-2023 16.10)");
+                sexprp->v3warn(E_UNSUPPORTED, "Unsupported: property local variable used across "
+                                              "non-constant cycle delay in consequent"
+                                              " (IEEE 1800-2023 16.10)");
                 errorEmitted = true;
                 return -1;
             }
@@ -1931,16 +1929,15 @@ class AssertNfaVisitor final : public VNVisitor {
                 preLen = walkSubstituteMatchItems(prep, K, matchItems, errorEmitted);
                 if (errorEmitted) return -1;
             }
-            const int bodyLen = walkSubstituteMatchItems(
-                sexprp->exprp(), K + preLen + delayCycles, matchItems, errorEmitted);
+            const int bodyLen = walkSubstituteMatchItems(sexprp->exprp(), K + preLen + delayCycles,
+                                                         matchItems, errorEmitted);
             if (errorEmitted) return -1;
             return preLen + delayCycles + bodyLen;
         }
         if (nodep->isMultiCycleSva()) {
-            nodep->v3warn(E_UNSUPPORTED,
-                          "Unsupported: property local variable used across "
-                          "composite sequence operator in consequent"
-                          " (IEEE 1800-2023 16.10)");
+            nodep->v3warn(E_UNSUPPORTED, "Unsupported: property local variable used across "
+                                         "composite sequence operator in consequent"
+                                         " (IEEE 1800-2023 16.10)");
             errorEmitted = true;
             return -1;
         }
@@ -1953,8 +1950,8 @@ class AssertNfaVisitor final : public VNVisitor {
                 newp = it->second->cloneTreePure(false);
             } else {
                 AstNodeExpr* const valp = it->second->cloneTreePure(false);
-                AstConst* const ticksp = new AstConst{
-                    rflp, AstConst::WidthedValue{}, 32, static_cast<uint32_t>(K)};
+                AstConst* const ticksp
+                    = new AstConst{rflp, AstConst::WidthedValue{}, 32, static_cast<uint32_t>(K)};
                 AstPast* const pastp = new AstPast{rflp, valp, ticksp};
                 pastp->dtypeFrom(valp);
                 newp = pastp;
