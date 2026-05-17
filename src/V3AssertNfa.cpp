@@ -1912,11 +1912,15 @@ class AssertNfaVisitor final : public VNVisitor {
     int walkSubstituteMatchItems(AstNodeExpr* nodep, int K,
                                  const std::unordered_map<const AstVar*, AstNodeExpr*>& matchItems,
                                  bool& errorEmitted) {
-        if (errorEmitted) return -1;
         if (AstSExpr* const sexprp = VN_CAST(nodep, SExpr)) {
-            AstDelay* const delayp = VN_CAST(sexprp->delayp(), Delay);
-            if (!delayp || !delayp->isCycleDelay() || delayp->isRangeDelay()
-                || !VN_IS(delayp->lhsp(), Const)) {
+            // IEEE 1800-2023 16.9.2: cycle_delay's lhsp is a constant_expression
+            // and the delay form in a sequence is always `##N`, folded by
+            // V3Const + V3Param before V3AssertNfa. Range form `##[m:n]` is the
+            // only user-visible reject here.
+            AstDelay* const delayp = VN_AS(sexprp->delayp(), Delay);
+            UASSERT_OBJ(delayp->isCycleDelay() && VN_IS(delayp->lhsp(), Const), sexprp,
+                        "SVA cycle delay must have a constant lhsp");
+            if (delayp->isRangeDelay()) {
                 sexprp->v3warn(E_UNSUPPORTED, "Unsupported: property local variable used across "
                                               "non-constant cycle delay in consequent"
                                               " (IEEE 1800-2023 16.10)");
@@ -1944,16 +1948,12 @@ class AssertNfaVisitor final : public VNVisitor {
         nodep->foreach([&](AstVarRef* refp) {
             const auto it = matchItems.find(refp->varp());
             if (it == matchItems.end()) return;
-            FileLine* const rflp = refp->fileline();
-            AstNodeExpr* newp;
-            if (K == 0) {
-                newp = it->second->cloneTreePure(false);
-            } else {
-                AstNodeExpr* const valp = it->second->cloneTreePure(false);
-                AstConst* const ticksp
-                    = new AstConst{rflp, AstConst::WidthedValue{}, 32, static_cast<uint32_t>(K)};
-                AstPast* const pastp = new AstPast{rflp, valp, ticksp};
-                pastp->dtypeFrom(valp);
+            AstNodeExpr* newp = it->second->cloneTreePure(false);
+            if (K > 0) {
+                AstConst* const ticksp = new AstConst{refp->fileline(), AstConst::WidthedValue{},
+                                                      32, static_cast<uint32_t>(K)};
+                AstPast* const pastp = new AstPast{refp->fileline(), newp, ticksp};
+                pastp->dtypeFrom(newp);
                 newp = pastp;
             }
             refp->replaceWith(newp);
@@ -1975,15 +1975,15 @@ class AssertNfaVisitor final : public VNVisitor {
         if (!parts.hasImplication) return false;
         AstExprStmt* const exprStmtp = VN_CAST(parts.triggerExprp, ExprStmt);
         if (!exprStmtp) return false;
+        // IEEE 1800-2023 16.10 BNF requires `(expr, match_item {, match_item})`
+        // with at least one match item; V3LinkParse only emits ExprStmt for
+        // this form and only emits AstAssign with VarRef LHS for each item.
         std::unordered_map<const AstVar*, AstNodeExpr*> matchItems;
         for (AstNode* stmtp = exprStmtp->stmtsp(); stmtp; stmtp = stmtp->nextp()) {
-            AstAssign* const assignp = VN_CAST(stmtp, Assign);
-            if (!assignp) continue;
-            // V3LinkParse only emits VarRef LHS for property match items.
+            AstAssign* const assignp = VN_AS(stmtp, Assign);
             AstVarRef* const lhsRefp = VN_AS(assignp->lhsp(), VarRef);
             matchItems[lhsRefp->varp()] = assignp->rhsp();
         }
-        if (matchItems.empty()) return false;
         const int startK = parts.isOverlapped ? 0 : 1;
         bool errorEmitted = false;
         walkSubstituteMatchItems(seqBodyp, startK, matchItems, errorEmitted);
