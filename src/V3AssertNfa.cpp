@@ -1947,7 +1947,8 @@ class AssertNfaVisitor final : public VNVisitor {
         }
         std::vector<AstVarRef*> refs;
         nodep->foreach([&refs](AstVarRef* p) { refs.push_back(p); });
-        for (AstVarRef* const refp : refs) {
+        for (auto refIt = refs.begin(); refIt != refs.end(); ++refIt) {
+            AstVarRef* const refp = *refIt;
             const auto it = matchItems.find(refp->varp());
             if (it == matchItems.end()) continue;
             AstNodeExpr* newp = it->second->cloneTreePure(false);
