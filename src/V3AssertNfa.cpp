@@ -1945,9 +1945,11 @@ class AssertNfaVisitor final : public VNVisitor {
             errorEmitted = true;
             return -1;
         }
-        nodep->foreach([&](AstVarRef* refp) {
+        std::vector<AstVarRef*> refs;
+        nodep->foreach([&refs](AstVarRef* p) { refs.push_back(p); });
+        for (AstVarRef* const refp : refs) {
             const auto it = matchItems.find(refp->varp());
-            if (it == matchItems.end()) return;
+            if (it == matchItems.end()) continue;
             AstNodeExpr* newp = it->second->cloneTreePure(false);
             if (K > 0) {
                 AstConst* const ticksp = new AstConst{refp->fileline(), AstConst::WidthedValue{},
@@ -1958,7 +1960,7 @@ class AssertNfaVisitor final : public VNVisitor {
             }
             refp->replaceWith(newp);
             VL_DO_DANGLING(pushDeletep(refp), refp);
-        });
+        }
         return 0;
     }
 

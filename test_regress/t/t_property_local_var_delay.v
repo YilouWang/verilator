@@ -49,6 +49,16 @@ module t (
   endproperty
   assert property (p_nonoverlap_d4);
 
+  // |-> with match-item ref inside the SExpr's preExprp: substitution
+  // is done at K = 0, exercising the inline branch (no $past wrapper).
+  property p_overlap_pre_ref;
+    int snap;
+    @(posedge clk) (cyc > 0,
+    snap = cyc - 1
+    ) |-> (snap == cyc - 1) ##2 (cyc > 2);
+  endproperty
+  assert property (p_overlap_pre_ref);
+
   // Nested SExpr: pre-expr 1'b1 plus ##2 then ##3. Total K = 5.
   property p_nested_seq;
     int snap;
