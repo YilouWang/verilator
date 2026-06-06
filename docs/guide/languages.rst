@@ -38,14 +38,6 @@ chandle, const, do-while, enum, export, final, import, int, interface,
 logic, longint, modport, package, program, shortint, struct, time, typedef,
 union, var, void, priority case/if, and unique case/if.
 
-It also supports .name and .\* interconnection.
-
-Verilator partially supports concurrent assert and cover statements; see
-the enclosed coverage tests for the allowed syntax.
-
-Verilator has limited support for class and related object-oriented
-constructs.
-
 
 SystemVerilog 2012 (IEEE 1800-2012) Support
 -------------------------------------------
@@ -363,13 +355,15 @@ appropriate width.
 Assertions
 ----------
 
-Verilator is beginning to add support for assertions. Verilator currently
-only converts assertions to simple ``if (...) error`` statements, and
-coverage statements to increment the line counters described in the
-coverage section.
+Verilator partially supports assertions and assertion-driven functional
+coverage.
 
-Verilator does not support SEREs yet. All assertion and coverage statements
-must be simple expressions that complete in one cycle.
+Coverage
+--------
+
+Verilator partially supports SystemVerilog functional coverage with
+``covergroup``, ``coverpoint``, bins, cross coverage, and transition bins.
+See :ref:`Covergroup Coverage`.
 
 
 Encrypted Verilog

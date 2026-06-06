@@ -39,6 +39,7 @@
 #include "V3PreShell.h"
 #include "V3Stats.h"
 
+#include <cctype>
 #include <sstream>
 
 VL_DEFINE_DEBUG_FUNCTIONS;
@@ -83,8 +84,8 @@ void V3ParseImp::importIfInStd(FileLine* fileline, const string& id, bool doImpo
             for (AstNode* itemp = v3Global.rootp()->stdPackagep()->stmtsp(); itemp;
                  itemp = itemp->nextp()) {
                 if (itemp->name() == "process") {
-                    v3Global.rootp()->stdPackageClassp(VN_AS(itemp, Class));
-                    UASSERT_OBJ(v3Global.rootp()->stdPackageClassp(), v3Global.rootp(),
+                    v3Global.rootp()->stdPackageProcessp(VN_AS(itemp, Class));
+                    UASSERT_OBJ(v3Global.rootp()->stdPackageProcessp(), v3Global.rootp(),
                                 "'std' package class should be found");
                     break;
                 }
@@ -306,9 +307,12 @@ void V3ParseImp::preprocDumps(std::ostream& os, bool forInputs) {
     if (forInputs && anyNonVerilog) os << "\n`verilog\n";
 }
 
-void V3ParseImp::parseFile(FileLine* fileline, const string& modfilename, bool inLibrary,
-                           bool inLibMap, const string& libname,
-                           const string& errmsg) {  // "" for no error, make fake node
+void V3ParseImp::parseFile(
+    FileLine* fileline, const string& modfilename, bool inLibrary, bool inLibMap,
+    const string& libname,
+    const string& errmsg,  // "" for no error, make fake node
+    const std::string& notFoundName) {  // name for AstNotFoundModule - modfilename will be used if
+                                        // notFoundName is empty
     const string nondirname = V3Os::filenameNonDir(modfilename);
     const string modname = V3Os::filenameNonDirExt(modfilename);
 
@@ -326,7 +330,8 @@ void V3ParseImp::parseFile(FileLine* fileline, const string& modfilename, bool i
     if (!ok) {
         if (errmsg != "") return;  // Threw error already
         // Create fake node for later error reporting
-        AstNodeModule* const nodep = new AstNotFoundModule{fileline, modname, libname};
+        AstNodeModule* const nodep = new AstNotFoundModule{
+            fileline, notFoundName.empty() ? modname : notFoundName, libname};
         v3Global.rootp()->addModulesp(nodep);
         return;
     }
@@ -843,6 +848,14 @@ int V3ParseImp::tokenToBison() {
     // Called as global since bison doesn't have our pointer
     tokenPipelineSym();  // sets yylval
     m_bisonLastFileline = yylval.fl;
+    if (m_tokenLastBison.token == '!'
+        && (yylval.token == '&' || yylval.token == '|' || yylval.token == '^'
+            || yylval.token == yP_NAND || yylval.token == yP_NOR || yylval.token == yP_XNOR)) {
+        m_tokenLastBison.fl->v3warn(NOTREDOP,
+                                    "Logical not directly before reduction operator is illegal\n"
+                                        << m_tokenLastBison.fl->warnMore()
+                                        << "... Suggest use parentheses, e.g. '!(|expr)'");
+    }
     m_tokenLastBison = yylval;
 
     if (debug() >= 6 || debugFlex() >= 6
@@ -884,8 +897,9 @@ V3Parse::~V3Parse() {  //
     VL_DO_CLEAR(delete m_impp, m_impp = nullptr);
 }
 void V3Parse::parseFile(FileLine* fileline, const string& modname, bool inLibrary, bool inLibMap,
-                        const string& libname, const string& errmsg) {
-    m_impp->parseFile(fileline, modname, inLibrary, inLibMap, libname, errmsg);
+                        const string& libname, const string& errmsg,
+                        const std::string& notFoundName) {
+    m_impp->parseFile(fileline, modname, inLibrary, inLibMap, libname, errmsg, notFoundName);
 }
 void V3Parse::ppPushText(V3ParseImp* impp, const string& text) {
     if (text != "") impp->ppPushText(text);

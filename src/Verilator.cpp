@@ -38,6 +38,7 @@
 #include "V3Control.h"
 #include "V3Coverage.h"
 #include "V3CoverageJoin.h"
+#include "V3Covergroup.h"
 #include "V3Dead.h"
 #include "V3Delayed.h"
 #include "V3Depth.h"
@@ -240,6 +241,10 @@ static void process() {
         // the AST context needed to recover and lower FSMs reliably.
         if (v3Global.opt.coverageNonFsm()) V3Coverage::coverage(v3Global.rootp());
 
+        // Functional coverage code generation
+        //    Generate code for covergroups/coverpoints
+        if (v3Global.useCovergroup()) V3Covergroup::covergroup(v3Global.rootp());
+
         // Resolve randsequence if they are used by the design
         if (v3Global.useRandSequence()) V3RandSequence::randSequenceNetlist(v3Global.rootp());
 
@@ -316,6 +321,7 @@ static void process() {
             // Module inlining
             // Cannot remove dead variables after this, as alias information for final
             // V3Scope's V3LinkDot is in the AstVar.
+            if (v3Global.opt.coverageFsm()) V3FsmDetect::markWrapperStateVars(v3Global.rootp());
             if (v3Global.opt.fInline()) {
                 V3Inline::inlineAll(v3Global.rootp());
                 V3LinkDot::linkDotArrayed(v3Global.rootp());  // Cleanup as made new modules
@@ -423,11 +429,10 @@ static void process() {
             // Convert forceable signals, process force/release statements.
             // After V3TraceDecl so we don't trace additional signals inserted to implement
             // forcing.
-            V3Force::forceAll(v3Global.rootp());
-
-            // Convert assign/deassign statements to forces on generated variables, so they can be
-            // handled by the same logic as regular force/release statements.
-            V3Force::assignAll(v3Global.rootp());
+            // Convert forceable signals and assign/deassign statements in one combined pass set.
+            // We reserve AST user slots across both sub-passes so helper pointers can be handed
+            // directly from force discovery to assign/deassign lowering without rediscovery.
+            V3Force::forceAndAssignAll(v3Global.rootp());
 
             // DFG optimization
             if (v3Global.opt.fDfg()) V3DfgOptimizer::optimize(v3Global.rootp());

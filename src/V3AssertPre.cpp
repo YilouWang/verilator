@@ -800,8 +800,8 @@ private:
         AstNodeDType* valp
             = v3Global.rootp()->typeTablep()->findBasicDType(flp, VBasicDTypeKwd::BIT);
         AstClassRefDType* keyp
-            = new AstClassRefDType{flp, v3Global.rootp()->stdPackageClassp(), nullptr};
-        keyp->classOrPackagep(v3Global.rootp()->stdPackageClassp());
+            = new AstClassRefDType{flp, v3Global.rootp()->stdPackageProcessp(), nullptr};
+        keyp->classOrPackagep(v3Global.rootp()->stdPackageProcessp());
         v3Global.rootp()->typeTablep()->addTypesp(keyp);
         AstAssocArrayDType* const typep = new AstAssocArrayDType{flp, valp, keyp};
         typep->dtypep(typep);
@@ -811,7 +811,7 @@ private:
     static AstStmtExpr* getProcessAssocArrayDelete(AstVarRef* const refp) {
         // Constructs refp.delete(std::process::self()) statement
         FileLine* const flp = refp->fileline();
-        refp->classOrPackagep(v3Global.rootp()->stdPackageClassp());
+        refp->classOrPackagep(v3Global.rootp()->stdPackageProcessp());
         AstCMethodHard* const deletep = new AstCMethodHard{
             flp, refp, VCMethod::ASSOC_ERASE, v3Global.rootp()->stdPackageProcessSelfp(flp)};
         deletep->dtypep(refp->findVoidDType());
@@ -819,7 +819,7 @@ private:
     }
     static AstNodeExpr* getProcessAssocArraySize(AstVarRef* const refp) {
         // Constructs refp.size() statement
-        refp->classOrPackagep(v3Global.rootp()->stdPackageClassp());
+        refp->classOrPackagep(v3Global.rootp()->stdPackageProcessp());
         AstCMethodHard* const sizep
             = new AstCMethodHard{refp->fileline(), refp, VCMethod::ASSOC_SIZE};
         sizep->dtypep(refp->findBasicDType(VBasicDTypeKwd::UINT32));
@@ -1082,6 +1082,19 @@ private:
         return new AstPExpr{flp, beginp, exprp->findBitDType()};
     }
 
+    // Reject [=M:N] nonconsecutive range that reached V3AssertPre.
+    // [->M:N] is fully handled upstream (NFA path); only [=M:N] still lands
+    // here because AstSNonConsRep lowering is not yet implemented there.
+    // Replaces the node with BitFalse so lowering continues after the warning.
+    bool rejectNonconsecRange(AstNode* nodep, AstNodeExpr* maxCountp) {
+        if (!maxCountp) return false;
+        nodep->v3warn(E_UNSUPPORTED, "Unsupported: [=M:N] nonconsecutive range repetition"
+                                     " (IEEE 1800-2023 16.9.2)");
+        nodep->replaceWith(new AstConst{nodep->fileline(), AstConst::BitFalse{}});
+        VL_DO_DANGLING(pushDeletep(nodep), nodep);
+        return true;
+    }
+
     void visit(AstSGotoRep* nodep) override {
         // Standalone goto rep (not inside implication antecedent)
         iterateChildren(nodep);
@@ -1097,6 +1110,7 @@ private:
     void visit(AstSNonConsRep* nodep) override {
         // Standalone nonconsecutive rep (not inside implication antecedent)
         iterateChildren(nodep);
+        if (rejectNonconsecRange(nodep, nodep->maxCountp())) return;
         FileLine* const flp = nodep->fileline();
         AstNodeExpr* countp = nodep->countp()->unlinkFrBack();
         if (!validateRepCount(nodep, countp)) return;
@@ -1154,6 +1168,7 @@ private:
         if (AstSNonConsRep* const ncrp = VN_CAST(nodep->lhsp(), SNonConsRep)) {
             iterateChildren(ncrp);
             iterateAndNextNull(nodep->rhsp());
+            if (rejectNonconsecRange(nodep, ncrp->maxCountp())) return;
             FileLine* const flp = nodep->fileline();
             AstNodeExpr* countp = ncrp->countp()->unlinkFrBack();
             if (!validateRepCount(nodep, countp)) return;

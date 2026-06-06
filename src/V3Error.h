@@ -61,6 +61,7 @@ public:
         I_TIMING,       // Enable timing from /*verilator timing_on/off*/
         I_TRACING,      // Tracing is on/off from /*verilator tracing_on/off*/
         // Error codes:
+        E_CONTASSINIT,  // Error: Continuous assignment versus initialization
         E_CONSTWRITTEN, // Error: Const variable being written.
         E_LIFETIME,     // Error: Reference to a variable might outlive the variable.
         E_NEEDTIMINGOPT,  // Error: --timing/--no-timing option not specified
@@ -139,6 +140,7 @@ public:
         NOLATCH,        // No latch detected in always_latch block
         NONSTD,         // Non-standard feature present in other sims
         NORETURN,       // Function with no return
+        NOTREDOP,       // Error: Logical not before reduction operator
         NULLPORT,       // Null port detected in module definition
         PARAMNODEFAULT, // Parameter without default
         PINCONNECTEMPTY,// Cell pin connected by name with empty reference
@@ -217,8 +219,8 @@ public:
             " I_CELLDEFINE", " I_COVERAGE", " I_DEF_NETTYPE_WIRE", " I_LINT", " I_STYLE",
             " I_TIMING", " I_TRACING",
             // Errors
-            "CONSTWRITTEN", "LIFETIME", "NEEDTIMINGOPT", "NOTIMING", "PORTSHORT", "TASKNSVAR",
-            "UNSUPPORTED",
+            "CONTASSINIT", "CONSTWRITTEN", "LIFETIME", "NEEDTIMINGOPT", "NOTIMING", "PORTSHORT",
+            "TASKNSVAR", "UNSUPPORTED",
             // Warnings
             " EC_FIRST_WARN", "ALWCOMBORDER", "ALWNEVER", "ASCRANGE", "ASSIGNDLY", "ASSIGNEQEXPR",
             "ASSIGNIN", "BADSTDPRAGMA", "BADVLTPRAGMA", "BLKANDNBLK", "BLKLOOPINIT", "BLKSEQ",
@@ -231,7 +233,7 @@ public:
             "IMPLICITSTATIC", "IMPORTSTAR", "IMPURE", "INCABSPATH", "INFINITELOOP", "INITIALDLY",
             "INSECURE", "INSIDETRUE", "LATCH", "LITENDIAN", "MINTYPMAXDLY", "MISINDENT", "MODDUP",
             "MODMISSING", "MULTIDRIVEN", "MULTITOP", "NEWERSTD", "NOEFFECT", "NOLATCH", "NONSTD",
-            "NORETURN", "NULLPORT", "PARAMNODEFAULT", "PINCONNECTEMPTY", "PINMISSING",
+            "NORETURN", "NOTREDOP", "NULLPORT", "PARAMNODEFAULT", "PINCONNECTEMPTY", "PINMISSING",
             "PINNOCONNECT", "PINNOTFOUND", "PKGNODECL", "PREPROCZERO", "PROCASSINIT",
             "PROCASSWIRE", "PROFOUTOFDATE", "PROTECTED", "PROTOTYPEMIS", "RANDC", "REALCVT",
             "REDEFMACRO", "RISEFALLDLY", "SELRANGE", "SHORTREAL", "SIDEEFFECT", "SPECIFYIGN",
@@ -268,7 +270,7 @@ public:
         return (m_e == ASSIGNIN || m_e == BADSTDPRAGMA || m_e == BADVLTPRAGMA || m_e == BLKANDNBLK
                 || m_e == BLKLOOPINIT || m_e == CONTASSREG || m_e == ENCAPSULATED
                 || m_e == ENDLABEL || m_e == ENUMITEMWIDTH || m_e == ENUMVALUE || m_e == HIERPARAM
-                || m_e == FUNCTIMECTL || m_e == IMPURE || m_e == MODMISSING
+                || m_e == FUNCTIMECTL || m_e == IMPURE || m_e == MODMISSING || m_e == NOTREDOP
                 || m_e == PARAMNODEFAULT || m_e == PINNOTFOUND || m_e == PKGNODECL
                 || m_e == PROCASSWIRE || m_e == PROTOTYPEMIS || m_e == SUPERNFIRST
                 || m_e == ZEROREPL);

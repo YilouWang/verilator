@@ -39,6 +39,29 @@ class VFlagLogicPacked {};
 
 // ######################################################################
 
+class VAbortKind final {
+public:
+    // IEEE 1800-2023 16.12.14 property abort operators.
+    enum en : uint8_t {
+        ACCEPT_ON,  // accept_on(cond) prop: async abort, property succeeds
+        REJECT_ON,  // reject_on(cond) prop: async abort, property fails
+        SYNC_ACCEPT_ON,  // sync_accept_on(cond) prop: sampled at matured clock, succeeds
+        SYNC_REJECT_ON  // sync_reject_on(cond) prop: sampled at matured clock, fails
+    };
+    enum en m_e;
+    // cppcheck-suppress noExplicitConstructor
+    constexpr VAbortKind(en _e)
+        : m_e{_e} {}
+    const char* ascii() const {
+        static const char* const names[]
+            = {"accept_on", "reject_on", "sync_accept_on", "sync_reject_on"};
+        return names[m_e];
+    }
+    bool isAccept() const { return m_e == ACCEPT_ON || m_e == SYNC_ACCEPT_ON; }
+};
+
+//######################################################################
+
 class VAccess final {
 public:
     enum en : uint8_t {
@@ -815,6 +838,7 @@ public:
         FORCE_ADD,
         FORCE_READ,
         FORCE_READ_INDEX,
+        FORCE_READ_SEL,
         FORCE_RELEASE,
         FORCE_TOUCH,
         FORK_DONE,
@@ -968,6 +992,7 @@ inline std::ostream& operator<<(std::ostream& os, const VCMethod& rhs) {
            {FORCE_ADD, "addForce", false}, \
            {FORCE_READ, "read", true}, \
            {FORCE_READ_INDEX, "readIndex", true}, \
+           {FORCE_READ_SEL, "readSel", true}, \
            {FORCE_RELEASE, "release", false}, \
            {FORCE_TOUCH, "touch", false}, \
            {FORK_DONE, "done", false}, \
@@ -1121,6 +1146,120 @@ constexpr bool operator==(VCastable::en lhs, const VCastable& rhs) { return lhs 
 inline std::ostream& operator<<(std::ostream& os, const VCastable& rhs) {
     return os << rhs.ascii();
 }
+
+//######################################################################
+
+class VCoverBinsType final {
+public:
+    enum en : uint8_t {
+        BINS_ARRAY,  // Array of bins with user-speciifed size
+        BINS_AUTO,  // Auto-sized array of bins (eg auto_bin_max)
+        BINS_DEFAULT,  // Default bin
+        BINS_IGNORE,  // Ignore bin
+        BINS_ILLEGAL,  // Illegal bin
+        BINS_TRANSITION,  // Transition bin
+        BINS_USER,  // Single bin with one or more values/ranges
+        BINS_WILDCARD  // Wildcard bin
+    };
+    enum en m_e;
+    VCoverBinsType()  // LCOV_EXCL_START
+        : m_e{BINS_USER} {}  // LCOV_EXCL_STOP
+    // cppcheck-suppress noExplicitConstructor
+    constexpr VCoverBinsType(en _e)
+        : m_e{_e} {}
+    constexpr operator en() const { return m_e; }  // LCOV_EXCL_LINE
+    const char* ascii() const {
+        static const char* const names[]
+            = {"user", "array", "auto", "ignore", "illegal", "default", "wildcard", "transition"};
+        return names[m_e];
+    }
+};
+constexpr bool operator==(const VCoverBinsType& lhs, VCoverBinsType::en rhs) {
+    return lhs.m_e == rhs;
+}
+
+//######################################################################
+
+class VCoverOptionType final {
+public:
+    enum en : uint8_t {
+        // Shared by option.* and type_option.*
+        WEIGHT,
+        GOAL,
+        AT_LEAST,
+        AUTO_BIN_MAX,
+        PER_INSTANCE,
+        COMMENT,
+        // option.* only (IEEE 1800-2023 Table 19-1)
+        NAME,
+        CROSS_NUM_PRINT_MISSING,
+        CROSS_RETAIN_AUTO_BINS,
+        DETECT_OVERLAP,
+        GET_INST_COVERAGE,
+        // type_option.* only (IEEE 1800-2023 Table 19-3)
+        STROBE,
+        MERGE_INSTANCES,
+        DISTRIBUTE_FIRST,
+        REAL_INTERVAL,
+        // sentinel - should never appear after parse-time validation
+        UNKNOWN
+    };
+    enum en m_e;
+    // cppcheck-suppress noExplicitConstructor
+    constexpr VCoverOptionType(en _e)
+        : m_e{_e} {}
+    const char* ascii() const {
+        static const char* const names[] = {"weight",
+                                            "goal",
+                                            "at_least",
+                                            "auto_bin_max",
+                                            "per_instance",
+                                            "comment",
+                                            "name",
+                                            "cross_num_print_missing",
+                                            "cross_retain_auto_bins",
+                                            "detect_overlap",
+                                            "get_inst_coverage",
+                                            "strobe",
+                                            "merge_instances",
+                                            "distribute_first",
+                                            "real_interval",
+                                            "unknown"};
+        return names[m_e];
+    }
+};
+constexpr bool operator==(const VCoverOptionType& lhs, VCoverOptionType::en rhs) {
+    return lhs.m_e == rhs;
+}
+
+//######################################################################
+
+class VTransRepType final {
+public:
+    enum en : uint8_t {
+        NONE,  // No repetition
+        CONSEC,  // Consecutive repetition [*]
+        GOTO,  // Goto repetition [->]
+        NONCONS  // Nonconsecutive repetition [=]
+    };
+    enum en m_e;
+    VTransRepType()  // LCOV_EXCL_START
+        : m_e{NONE} {}  // LCOV_EXCL_STOP
+    // cppcheck-suppress noExplicitConstructor
+    constexpr VTransRepType(en _e)
+        : m_e{_e} {}
+    explicit VTransRepType(int _e)  // LCOV_EXCL_START
+        : m_e(static_cast<en>(_e)) {}  // LCOV_EXCL_STOP  // Need () or GCC 4.8 false warning
+    constexpr operator en() const { return m_e; }  // LCOV_EXCL_LINE
+    const char* ascii() const {
+        static const char* const names[] = {"", "[*]", "[->]", "[=]"};
+        return names[m_e];
+    }
+    const char* asciiJson() const {
+        static const char* const names[] = {"\"none\"", "\"consec\"", "\"goto\"", "\"noncons\""};
+        return names[m_e];
+    }
+};
 
 //######################################################################
 

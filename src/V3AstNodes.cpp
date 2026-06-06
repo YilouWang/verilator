@@ -182,6 +182,15 @@ AstCond::AstCond(FileLine* fl, AstNodeExpr* condp, AstNodeExpr* thenp, AstNodeEx
     }
 }
 
+void AstAbortOn::dump(std::ostream& str) const {
+    this->AstNodeExpr::dump(str);
+    str << " [" << kind().ascii() << "]";
+}
+void AstAbortOn::dumpJson(std::ostream& str) const {
+    dumpJsonStr(str, "kind", kind().ascii());
+    dumpJsonGen(str);
+}
+
 void AstAddrOfCFunc::dump(std::ostream& str) const {
     this->AstNodeExpr::dump(str);
     str << " -> ";
@@ -273,7 +282,9 @@ bool AstBasicDType::similarDTypeNode(const AstNodeDType* samep) const {
           || (m.m_keyword == VBasicDTypeKwd::LOGIC
               && sp->m.m_keyword == VBasicDTypeKwd::LOGIC_IMPLICIT)))
         return false;
-    if (!(m.m_nrange == sp->m.m_nrange)) return false;
+    // IEEE 1800-2023 6.22.2: equivalent by bit width, not range direction
+    if (m.m_nrange.ranged() != sp->m.m_nrange.ranged()) return false;
+    if (m.m_nrange.elements() != sp->m.m_nrange.elements()) return false;
     // Squash so NOSIGN == UNSIGNED
     if (numeric().isSigned() != sp->numeric().isSigned()) return false;
     if (!rangep() && !sp->rangep()) return true;
@@ -1039,6 +1050,25 @@ const AstNodeDType* AstNodeDType::skipRefIterp(bool skipConst, bool skipEnum,
     }
     this->v3errorEnd(V3Error::v3errorStr());
     return nullptr;
+}
+
+const AstNodeDType* AstNodeDType::elemDTypep(bool skipRef) const {
+    const AstNodeDType* dtypep = this;
+    while (true) {
+        if (skipRef) dtypep = dtypep->skipRefp();
+        if (const AstBracketArrayDType* const adtypep = VN_CAST(dtypep, BracketArrayDType)) {
+            dtypep = adtypep->subDTypep();
+        } else if (const AstDynArrayDType* const adtypep = VN_CAST(dtypep, DynArrayDType)) {
+            dtypep = adtypep->subDTypep();
+        } else if (const AstQueueDType* const adtypep = VN_CAST(dtypep, QueueDType)) {
+            dtypep = adtypep->subDTypep();
+        } else if (const AstUnpackArrayDType* const adtypep = VN_CAST(dtypep, UnpackArrayDType)) {
+            dtypep = adtypep->subDTypep();
+        } else {
+            break;
+        }
+    }
+    return dtypep;
 }
 
 bool AstNodeDType::similarDType(const AstNodeDType* samep) const {
@@ -2003,6 +2033,7 @@ void AstClass::dump(std::ostream& str) const {
     if (isInterfaceClass()) str << " [IFCCLS]";
     if (isVirtual()) str << " [VIRT]";
     if (useVirtualPublic()) str << " [VIRPUB]";
+    if (isPrintedFrom()) str << " [PRINTED]";
 }
 void AstClass::dumpJson(std::ostream& str) const {
     // dumpJsonNumFunc(str, declTokenNum);  // Not dumped as adding token changes whole file
@@ -2010,6 +2041,7 @@ void AstClass::dumpJson(std::ostream& str) const {
     dumpJsonBoolFuncIf(str, isExtended);
     dumpJsonBoolFuncIf(str, isInterfaceClass);
     dumpJsonBoolFuncIf(str, isVirtual);
+    dumpJsonBoolFuncIf(str, isPrintedFrom);
     if (baseOverride().isAny()) dumpJsonStr(str, "baseOverride", baseOverride().ascii());
     dumpJsonGen(str);
 }
@@ -2608,10 +2640,12 @@ void AstNodeUOrStructDType::dump(std::ostream& str) const {
     if (packed()) str << " [PACKED]";
     if (isFourstate()) str << " [4STATE]";
     if (classOrPackagep()) str << " pkg=" << nodeAddr(classOrPackagep());
+    if (emitToString()) str << " [EMITSTR]";
 }
 void AstNodeUOrStructDType::dumpJson(std::ostream& str) const {
     dumpJsonBoolFuncIf(str, packed);
     dumpJsonBoolFuncIf(str, isFourstate);
+    dumpJsonBoolFuncIf(str, emitToString);
     dumpJsonGen(str);
 }
 void AstUnionDType::dump(std::ostream& str) const {
@@ -2775,15 +2809,15 @@ AstVarScope* AstNetlist::stlFirstIterationp() {
     return vscp;
 }
 AstFuncRef* AstNetlist::stdPackageProcessSelfp(FileLine* flp) const {
-    UASSERT(v3Global.rootp()->stdPackageClassp(), "'std' should be imported");
+    UASSERT(v3Global.rootp()->stdPackageProcessp(), "'std' should be imported");
     AstFunc* selfp = nullptr;
-    for (AstNode* itemp = v3Global.rootp()->stdPackageClassp()->stmtsp(); itemp;
+    for (AstNode* itemp = v3Global.rootp()->stdPackageProcessp()->stmtsp(); itemp;
          itemp = itemp->nextp()) {
         if (itemp->name() == "self") selfp = VN_AS(itemp, Func);
     }
     UASSERT(selfp, "'std::process::self' should be found");
     AstFuncRef* const processSelfp = new AstFuncRef{flp, selfp};
-    processSelfp->classOrPackagep(v3Global.rootp()->stdPackageClassp());
+    processSelfp->classOrPackagep(v3Global.rootp()->stdPackageProcessp());
     return processSelfp;
 }
 void AstNodeModule::dump(std::ostream& str) const {
@@ -2970,6 +3004,11 @@ bool AstWildcardArrayDType::sameNode(const AstNode* samep) const {
 bool AstWildcardArrayDType::similarDTypeNode(const AstNodeDType* samep) const {
     const AstWildcardArrayDType* const asamep = VN_DBG_AS(samep, WildcardArrayDType);
     return asamep->subDTypep() && subDTypep()->similarDType(asamep->subDTypep());
+}
+bool AstUnpackArrayDType::similarDTypeNode(const AstNodeDType* samep) const {
+    const AstUnpackArrayDType* const asamep = VN_DBG_AS(samep, UnpackArrayDType);
+    return hi() == asamep->hi() && rangep()->sameTree(asamep->rangep())
+           && subDTypep()->similarDType(asamep->subDTypep());
 }
 void AstSampleQueueDType::dumpSmall(std::ostream& str) const {
     this->AstNodeDType::dumpSmall(str);
@@ -3693,3 +3732,54 @@ void AstWith::dumpJson(std::ostream& str) const {
     }
     dumpJsonGen(str);
 }
+
+//######################################################################
+// Functional coverage dump methods
+
+void AstCoverpoint::dump(std::ostream& str) const { this->AstNodeFuncCovItem::dump(str); }
+
+void AstCoverpoint::dumpJson(std::ostream& str) const { this->AstNodeFuncCovItem::dumpJson(str); }
+
+void AstCoverBin::dump(std::ostream& str) const {
+    this->AstNode::dump(str);
+    str << " " << m_type.ascii();
+    if (m_isArray) str << "[]";
+}
+
+void AstCoverBin::dumpJson(std::ostream& str) const {
+    this->AstNode::dumpJson(str);
+    str << ", \"binsType\": \"" << m_type.ascii() << "\"";
+    if (m_isArray) str << ", \"isArray\": true";
+}
+
+void AstCoverTransItem::dump(std::ostream& str) const {
+    this->AstNode::dump(str);
+    if (m_repType != VTransRepType::NONE) str << " " << m_repType.ascii();
+}
+
+void AstCoverTransItem::dumpJson(std::ostream& str) const {
+    this->AstNode::dumpJson(str);
+    str << ", \"repType\": " << m_repType.asciiJson();
+}
+
+void AstCoverTransSet::dump(std::ostream& str) const { this->AstNode::dump(str); }
+
+void AstCoverTransSet::dumpJson(std::ostream& str) const { this->AstNode::dumpJson(str); }
+
+void AstCoverCross::dump(std::ostream& str) const { this->AstNodeFuncCovItem::dump(str); }
+
+void AstCoverCross::dumpJson(std::ostream& str) const { this->AstNodeFuncCovItem::dumpJson(str); }
+
+void AstCoverOption::dump(std::ostream& str) const {
+    this->AstNode::dump(str);
+    str << " " << m_type.ascii();
+}
+
+void AstCoverOption::dumpJson(std::ostream& str) const {
+    this->AstNode::dumpJson(str);
+    str << ", \"optionType\": \"" << m_type.ascii() << "\"";
+}
+
+void AstCoverpointRef::dump(std::ostream& str) const { this->AstNode::dump(str); }
+
+void AstCoverpointRef::dumpJson(std::ostream& str) const { this->AstNode::dumpJson(str); }
