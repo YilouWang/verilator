@@ -1348,6 +1348,17 @@ class ParamProcessor final {
         }
     }
 
+    // True if a $bits/$size type query in nodep's parameters reads another type parameter.
+    static bool defaultParamsHaveTypeQueryOnParamType(const AstClassRefDType* nodep) {
+        bool found = false;
+        nodep->foreach([&](const AstAttrOf* attrp) {
+            if (found || !attrp->attrType().isTypeQuery()) return;
+            const AstRefDType* const refp = VN_CAST(attrp->fromp(), RefDType);
+            if (refp && VN_IS(refp->refDTypep(), ParamTypeDType)) found = true;
+        });
+        return found;
+    }
+
     // Check if exprp's class matches origp's class after deparameterization.
     // Handles both the simple case (user4p link from defaultsResolved) and the
     // nested case where the default's inner class has non-default sub-parameters
@@ -1362,6 +1373,9 @@ class ParamProcessor final {
         const AstNodeModule* const defaultClonep
             = VN_CAST(origClassRefp->classp()->user4p(), Class);
         if (defaultClonep && defaultClonep == exprClassRefp->classp()) return true;
+        // Skip the comparison when the default's $bits/$size reads another type parameter, as
+        // deparameterizing it below would resolve that shared type at the wrong width (#7711).
+        if (defaultParamsHaveTypeQueryOnParamType(origClassRefp)) return false;
         // Slow path: deparameterize the default type and compare the result.
         // Different templates can never match; use origName() because exprp's
         // class may already be a specialization (clone) of the template.
@@ -2557,11 +2571,9 @@ class ParamVisitor final : public VNVisitor {
                 // Iterate the body
                 {
                     VL_RESTORER(m_modp);
-                    VL_RESTORER(m_ifacePortNames);
-                    VL_RESTORER(m_ifaceInstCells);
+                    VL_RESTORER_CLEAR(m_ifacePortNames);
+                    VL_RESTORER_CLEAR(m_ifaceInstCells);
                     m_modp = modp;
-                    m_ifacePortNames.clear();
-                    m_ifaceInstCells.clear();
                     iterateChildren(modp);
                 }
             }
@@ -2722,10 +2734,14 @@ class ParamVisitor final : public VNVisitor {
         // LCOV_EXCL_STOP
     }
 
-    void checkParamNotHier(AstNode* valuep) {
-        if (!valuep) return;
-        valuep->foreachAndNext([&](const AstNodeExpr* exprp) {
-            if (const AstVarXRef* const refp = VN_CAST(exprp, VarXRef)) {
+    // Flag hierarchical refs in a parameter value. Single top-down pass.
+    void checkParamNotHierRecurse(AstNode* nodep, bool underTypeQuery = false) {
+        for (; nodep; nodep = nodep->nextp()) {
+            // Refs read only for their type ($bits etc.) are allowed
+            const AstAttrOf* const attrp = VN_CAST(nodep, AttrOf);
+            const bool childUnderQuery
+                = underTypeQuery || (attrp && attrp->attrType().isTypeQuery());
+            if (const AstVarXRef* const refp = VN_CAST(nodep, VarXRef)) {
                 // Allow hierarchical ref to interface params through interface/modport ports
                 // or local interface instances
                 bool isIfaceRef = false;
@@ -2735,18 +2751,21 @@ class ParamVisitor final : public VNVisitor {
                         = !refname.empty()
                           && (m_ifacePortNames.count(refname) || m_ifaceInstCells.count(refname));
                 }
-
-                if (!isIfaceRef) {
+                if (!isIfaceRef && !underTypeQuery) {
                     refp->v3warn(HIERPARAM, "Parameter values cannot use hierarchical values"
                                             " (IEEE 1800-2023 6.20.2)");
                 }
-            } else if (const AstNodeFTaskRef* refp = VN_CAST(exprp, NodeFTaskRef)) {
+            } else if (const AstNodeFTaskRef* const refp = VN_CAST(nodep, NodeFTaskRef)) {
                 if (refp->dotted() != "") {
                     refp->v3error("Parameter values cannot call hierarchical functions"
                                   " (IEEE 1800-2023 6.20.2)");
                 }
             }
-        });
+            checkParamNotHierRecurse(nodep->op1p(), childUnderQuery);
+            checkParamNotHierRecurse(nodep->op2p(), childUnderQuery);
+            checkParamNotHierRecurse(nodep->op3p(), childUnderQuery);
+            checkParamNotHierRecurse(nodep->op4p(), childUnderQuery);
+        }
     }
 
     // Deparameterize and constify nested interface cells within ifaceModp.
@@ -2888,7 +2907,7 @@ class ParamVisitor final : public VNVisitor {
         iterateChildren(nodep);
     }
     void visit(AstCell* nodep) override {
-        checkParamNotHier(nodep->paramsp());
+        checkParamNotHierRecurse(nodep->paramsp());
         if (VN_IS(nodep->modp(), Iface)) m_ifaceInstCells.emplace(nodep->name(), nodep);
         visitCellOrClassRef(nodep, VN_IS(nodep->modp(), Iface));
     }
@@ -2896,7 +2915,7 @@ class ParamVisitor final : public VNVisitor {
         if (nodep->ifacep()) visitCellOrClassRef(nodep, true);
     }
     void visit(AstClassRefDType* nodep) override {
-        checkParamNotHier(nodep->paramsp());
+        checkParamNotHierRecurse(nodep->paramsp());
         visitCellOrClassRef(nodep, false);
     }
     void visit(AstClassOrPackageRef* nodep) override {
@@ -2913,7 +2932,7 @@ class ParamVisitor final : public VNVisitor {
         if (nodep->isIfaceRef()) { m_ifacePortNames.insert(nodep->name()); }
         iterateChildren(nodep);
         if (nodep->isParam()) {
-            checkParamNotHier(nodep->valuep());
+            checkParamNotHierRecurse(nodep->valuep());
             if (!nodep->valuep() && !VN_IS(m_modp, Class)) {
                 nodep->v3error("Parameter without default value is never given value"
                                << " (IEEE 1800-2023 6.20.1): " << nodep->prettyNameQ());
@@ -3220,7 +3239,7 @@ class ParamVisitor final : public VNVisitor {
                 // Note this clears nodep->genforp(), so begin is no longer special
             }
         } else {
-            VL_RESTORER(m_generateHierName);
+            VL_RESTORER_COPY(m_generateHierName);
             m_generateHierName += "." + nodep->prettyName();
             iterateChildren(nodep);
         }

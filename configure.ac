@@ -12,7 +12,7 @@
 # Then 'make maintainer-dist'
 #AC_INIT([Verilator],[#.### YYYY-MM-DD])
 #AC_INIT([Verilator],[#.### devel])
-AC_INIT([Verilator],[5.049 devel],
+AC_INIT([Verilator],[5.051 devel],
         [https://verilator.org],
         [verilator],[https://verilator.org])
 
@@ -128,6 +128,21 @@ AC_ARG_ENABLE([dev-gcov],
                CFG_WITH_DEV_GCOV=no)
 AC_SUBST(CFG_WITH_DEV_GCOV)
 AC_MSG_RESULT($CFG_WITH_DEV_GCOV)
+
+# Flag to reduce the debug info in the debug executable to minimize its size
+AC_MSG_CHECKING(whether to reduce debug info in the debug executable)
+AC_ARG_ENABLE([light-debug],
+              [AS_HELP_STRING([--enable-light-debug],
+                              [Reduce the amount of debug information in the debug
+                               Verilator executable to minimize its size. Enable
+                               slight optimization. Enough for backtraces only.])],
+              [case "${enableval}" in
+                yes) CFG_WITH_LIGHT_DEBUG=yes ;;
+                no)  CFG_WITH_LIGHT_DEBUG=no ;;
+                *)   AC_MSG_ERROR([bad value '${enableval}' for --enable-light-debug]) ;;
+               esac],
+               CFG_WITH_LIGHT_DEBUG=no)
+AC_MSG_RESULT($CFG_WITH_LIGHT_DEBUG)
 
 # Special Substitutions - CFG_WITH_DEFENV
 AC_MSG_CHECKING(whether to use hardcoded paths)
@@ -421,6 +436,15 @@ AC_DEFUN([_MY_LDLIBS_CHECK_OPT],
     _MY_LDLIBS_CHECK_IFELSE($2, $1="$$1 $2")
    ])
 
+AC_DEFUN([_MY_LDLIBS_CHECK_SET],
+   [# _MY_LDLIBS_CHECK_SET(variable, flag) -- Check if linker supports specific
+    # options. If it does, set variable to flag, only if not previously set
+    # (so the first supported flag wins and the rest are not tested).
+    if test "$$1" = ""; then
+       _MY_LDLIBS_CHECK_IFELSE($2, $1="$2")
+    fi
+   ])
+
 # Add the coverage flags early as they influence later checks.
 if test "$CFG_WITH_DEV_GCOV" = "yes"; then
   _MY_CXX_CHECK_OPT(CXX,--coverage)
@@ -483,6 +507,11 @@ _MY_CXX_CHECK_CORO_SET(CFG_CXXFLAGS_COROUTINES,-std=gnu++20)
 AC_SUBST(CFG_CXXFLAGS_COROUTINES)
 AC_SUBST(HAVE_COROUTINES)
 
+# Check if the C++ compiler supports ThreadSanitizer
+_MY_CXX_CHECK_IFELSE(-fsanitize=thread,
+  [AC_DEFINE([HAVE_TSAN],[1],[Defined if ThreadSanitizer is supported by $CXX])])
+AC_SUBST(HAVE_TSAN)
+
 # Flags for compiling Verilator internals including parser always
 if test "$CFG_WITH_DEV_ASAN" = "yes"; then
   _MY_CXX_CHECK_IFELSE(-fsanitize=address -DVL_ASAN,
@@ -509,15 +538,27 @@ _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_PARSER,-Wno-unused)
 AC_SUBST(CFG_CXXFLAGS_PARSER)
 
 # Flags for compiling the debug version of Verilator (in addition to above CFG_CXXFLAGS_SRC)
-if test "$CFG_WITH_DEV_GCOV" = "no"; then # Do not optimize for the coverage build
-_MY_CXX_CHECK_OPT(CFG_CXXFLAGS_DBG,-Og)
+if test "$CFG_WITH_LIGHT_DEBUG" = "yes"; then
+  # Slight optimization and minimal compressed debug info. This is enough for
+  # --gdb/--gdbbt backtraces, but omits the bulk of the debug info, which
+  # significantly reduces object file sizes. For CI or release builds.
+  if test "$CFG_WITH_DEV_GCOV" = "no"; then # Do not optimize for the coverage build
+    _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_DBG,-Og)
+  fi
+  _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_DBG,-ggdb1)
+  _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_DBG,-fdebug-info-for-profiling) # For fully-qualified names with clang
+  _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_DBG,-gz)
+else
+  # Full debug: no optimization, full debug info, for development.
+  _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_DBG,-O0)
+  _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_DBG,-ggdb)
 fi
-_MY_CXX_CHECK_OPT(CFG_CXXFLAGS_DBG,-ggdb)
-_MY_CXX_CHECK_OPT(CFG_CXXFLAGS_DBG,-gz)
 AC_SUBST(CFG_CXXFLAGS_DBG)
 
 # Flags for linking the debug version of Verilator (in addition to above CFG_LDFLAGS_SRC)
-_MY_LDLIBS_CHECK_OPT(CFG_LDFLAGS_DBG,-gz)
+if test "$CFG_WITH_LIGHT_DEBUG" = "yes"; then
+  _MY_LDLIBS_CHECK_OPT(CFG_LDFLAGS_DBG,-gz)
+fi
 AC_SUBST(CFG_LDFLAGS_DBG)
 
 # Flags for compiling the optimized version of Verilator (in addition to above CFG_CXXFLAGS_SRC)
@@ -580,6 +621,34 @@ m4_foreach([ldflag], [
 AC_SUBST(CFG_LDLIBS_THREADS)
 AC_SUBST(CFG_LDFLAGS_THREADS_CMAKE)
 
+# Find link flags for runtime VPI library loading (+verilator+vpi+<lib>).
+# The model executable must export its VPI symbols so the dlopen'd library can
+# resolve them: -rdynamic (GNU ld) or -Wl,-export_dynamic (Darwin); the first the
+# linker accepts wins.  -ldl provides dlopen/dlsym where it is a separate library.
+_MY_LDLIBS_CHECK_SET(CFG_LDFLAGS_DYNAMIC, -rdynamic)
+# -Wl,-export_dynamic contains a comma, so probe it directly rather than through
+# the _MY_LDLIBS_CHECK_* macros (which re-expand their flag argument unquoted).
+if test "$CFG_LDFLAGS_DYNAMIC" = ""; then
+  ACO_SAVE_LIBS="$LIBS"
+  LIBS="$LIBS -Wl,-export_dynamic"
+  AC_MSG_CHECKING([whether $CXX linker accepts -Wl,-export_dynamic])
+  AC_LINK_IFELSE(
+       [AC_LANG_PROGRAM([[]])],
+       [_my_result=yes
+        if test -s conftest.err; then
+          if grep -e "-export_dynamic" conftest.err >/dev/null; then
+            _my_result=no
+          fi
+        fi],
+       [_my_result=no])
+  AC_MSG_RESULT($_my_result)
+  LIBS="$ACO_SAVE_LIBS"
+  if test "$_my_result" = "yes"; then CFG_LDFLAGS_DYNAMIC="-Wl,-export_dynamic"; fi
+fi
+AC_SUBST(CFG_LDFLAGS_DYNAMIC)
+_MY_LDLIBS_CHECK_OPT(CFG_LDLIBS_DYNAMIC, -ldl)
+AC_SUBST(CFG_LDLIBS_DYNAMIC)
+
 # If 'mold' is installed, use it to link for faster buildtimes
 _MY_LDLIBS_CHECK_OPT(CFG_LDFLAGS_SRC, -fuse-ld=mold)
 _MY_LDLIBS_CHECK_OPT(CFG_LDFLAGS_VERILATED, -fuse-ld=mold)
@@ -589,11 +658,6 @@ if test "$CFG_ENABLE_PARTIAL_STATIC" = "yes"; then
   _MY_LDLIBS_CHECK_OPT(CFG_LDFLAGS_SRC, -static-libgcc)
   _MY_LDLIBS_CHECK_OPT(CFG_LDFLAGS_SRC, -static-libstdc++)
   _MY_LDLIBS_CHECK_OPT(CFG_LDFLAGS_SRC, -Xlinker -gc-sections)
-  LTCMALLOC="-Wl,--whole-archive -l:libtcmalloc_minimal.a -Wl,--no-whole-archive"
-  LJEMALLOC="-Wl,--whole-archive -l:libjemalloc.a -Wl,--no-whole-archive"
-else
-  LTCMALLOC=-ltcmalloc_minimal
-  LJEMALLOC=-ljemalloc
 fi
 AC_SUBST(CFG_LDFLAGS_SRC)
 AC_SUBST(CFG_LDFLAGS_VERILATED)
@@ -609,51 +673,56 @@ _MY_LDLIBS_CHECK_OPT(CFG_LIBS, -latomic)
 _MY_LDLIBS_CHECK_OPT(CFG_LIBS, -lbcrypt)
 _MY_LDLIBS_CHECK_OPT(CFG_LIBS, -lpsapi)
 
-# Check if jemalloc is available based on --enable-jemalloc
-# jemalloc is preferred over tcmalloc when both are available
+# Figure out which malloc library to use:
+# - Prefer jemalloc over tcmalloc (it's faster)
+# - If partial static link enabled, prefer static libraries,
+#   but fall back on dynamic if static is not available
+
+# Test for jemalloc
 CFG_HAVE_JEMALLOC=no
-_MY_LDLIBS_CHECK_IFELSE(
-  $LJEMALLOC,
-  [if test "$CFG_WITH_JEMALLOC" != "no"; then
-    CFG_LIBS="$LJEMALLOC $CFG_LIBS";
-    CFG_HAVE_JEMALLOC=yes;
-    # If using jemalloc, add some extra options to make the compiler not assume
-    # it is using its own versions of the standard library functions
-    _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_SRC,-fno-builtin-malloc)
-    _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_SRC,-fno-builtin-calloc)
-    _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_SRC,-fno-builtin-realloc)
-    _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_SRC,-fno-builtin-free)
+if test "$CFG_WITH_JEMALLOC" != "no"; then
+  if test "$CFG_ENABLE_PARTIAL_STATIC" = "yes"; then
+    _MY_LDLIBS_CHECK_SET(CFG_LIBS_MALLOC, -Xlinker --whole-archive -l:libjemalloc.a -Xlinker --no-whole-archive)
+  fi
+  _MY_LDLIBS_CHECK_SET(CFG_LIBS_MALLOC, -ljemalloc)
+  if test "$CFG_LIBS_MALLOC" != ""; then
+    CFG_HAVE_JEMALLOC=yes
     AC_DEFINE([HAVE_JEMALLOC],[1],[Defined if have jemalloc])
-   fi],
-  [if test "$CFG_WITH_JEMALLOC" = "yes"; then
-    AC_MSG_ERROR([--enable-jemalloc was given but test for ${LJEMALLOC} failed])
-   fi])
+  elif test "$CFG_WITH_JEMALLOC" = "yes"; then
+    AC_MSG_ERROR([--enable-jemalloc was given but jemalloc is not available])
+  fi
+fi
 AC_SUBST(HAVE_JEMALLOC)
 
-# Check if tcmalloc is available based on --enable-tcmalloc
-# Only use tcmalloc if jemalloc was not found/enabled
-if test "$CFG_HAVE_JEMALLOC" = "yes"; then
-  AC_MSG_NOTICE([jemalloc found, skipping tcmalloc check])
-else
+# Test for tcmalloc
 CFG_HAVE_TCMALLOC=no
-_MY_LDLIBS_CHECK_IFELSE(
-  $LTCMALLOC,
-  [if test "$CFG_WITH_TCMALLOC" != "no"; then
-    CFG_LIBS="$LTCMALLOC $CFG_LIBS";
-    CFG_HAVE_TCMALLOC=yes;
-    # If using tcmalloc, add some extra options to make the compiler not assume
-    # it is using its own versions of the standard library functions
-    _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_SRC,-fno-builtin-malloc)
-    _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_SRC,-fno-builtin-calloc)
-    _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_SRC,-fno-builtin-realloc)
-    _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_SRC,-fno-builtin-free)
+if test "$CFG_HAVE_JEMALLOC" = "yes"; then
+  AC_MSG_NOTICE([jemalloc found, skipping check for tcmalloc])
+elif test "$CFG_WITH_TCMALLOC" != "no"; then
+  if test "$CFG_ENABLE_PARTIAL_STATIC" = "yes"; then
+    _MY_LDLIBS_CHECK_SET(CFG_LIBS_MALLOC, -Xlinker --whole-archive -l:libtcmalloc_minimal.a -Xlinker --no-whole-archive)
+  fi
+  _MY_LDLIBS_CHECK_SET(CFG_LIBS_MALLOC, -ltcmalloc_minimal)
+  if test "$CFG_LIBS_MALLOC" != ""; then
+    CFG_HAVE_TCMALLOC=yes
     AC_DEFINE([HAVE_TCMALLOC],[1],[Defined if have tcmalloc])
-   fi],
-  [if test "$CFG_WITH_TCMALLOC" = "yes"; then
-    AC_MSG_ERROR([--enable-tcmalloc was given but test for ${LTCMALLOC} failed])
-   fi])
+  elif test "$CFG_WITH_TCMALLOC" = "yes"; then
+    AC_MSG_ERROR([--enable-tcmalloc was given but tcmalloc is not available])
+  fi
 fi
 AC_SUBST(HAVE_TCMALLOC)
+
+if test "$CFG_HAVE_JEMALLOC" = "yes" || test "$CFG_HAVE_TCMALLOC" = "yes"; then
+  # If using custom malloc, add some extra options to make the compiler not assume
+  # it is using its own versions of the standard library functions
+  _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_SRC,-fno-builtin-malloc)
+  _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_SRC,-fno-builtin-calloc)
+  _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_SRC,-fno-builtin-realloc)
+  _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_SRC,-fno-builtin-free)
+fi
+
+# Finished with libraries
+CFG_LIBS="$CFG_LIBS_MALLOC $CFG_LIBS"
 AC_SUBST(CFG_LIBS)
 
 # Need C++14 at least

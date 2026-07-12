@@ -342,7 +342,6 @@ public:
         VAR_PUBLIC_FLAT,                // V3LinkParse moves to AstVar::sigPublic
         VAR_PUBLIC_FLAT_RD,             // V3LinkParse moves to AstVar::sigPublic
         VAR_PUBLIC_FLAT_RW,             // V3LinkParse moves to AstVar::sigPublic
-        VAR_ISOLATE_ASSIGNMENTS,        // V3LinkParse moves to AstVar::attrIsolateAssign
         VAR_SC_BIGUINT,                 // V3LinkParse moves to AstVar::attrScBigUint
         VAR_SC_BV,                      // V3LinkParse moves to AstVar::attrScBv
         VAR_SFORMAT,                    // V3LinkParse moves to AstVar::attrSFormat
@@ -364,11 +363,29 @@ public:
             "TYPEID", "TYPENAME",
             "VAR_BASE", "VAR_FORCEABLE", "VAR_FSM_ARC_INCLUDE_COND", "VAR_FSM_RESET_ARC",
             "VAR_FSM_STATE", "VAR_PORT_DTYPE", "VAR_PUBLIC", "VAR_PUBLIC_FLAT",
-            "VAR_PUBLIC_FLAT_RD", "VAR_PUBLIC_FLAT_RW", "VAR_ISOLATE_ASSIGNMENTS",
+            "VAR_PUBLIC_FLAT_RD", "VAR_PUBLIC_FLAT_RW",
             "VAR_SC_BIGUINT", "VAR_SC_BV", "VAR_SFORMAT", "VAR_SPLIT_VAR"
         };
         // clang-format on
         return names[m_e];
+    }
+    // True for attributes that read an operand's type rather than its value, such as $bits.
+    bool isTypeQuery() const {
+        switch (m_e) {
+        case DIM_BITS:
+        case DIM_BITS_OR_NUMBER:
+        case DIM_DIMENSIONS:
+        case DIM_HIGH:
+        case DIM_INCREMENT:
+        case DIM_LEFT:
+        case DIM_LOW:
+        case DIM_RIGHT:
+        case DIM_SIZE:
+        case DIM_UNPK_DIMENSIONS:
+        case TYPEID:
+        case TYPENAME: return true;
+        default: return false;
+        }
     }
     VAttrType()
         : m_e{ILLEGAL} {}
@@ -1173,6 +1190,19 @@ public:
             = {"user", "array", "auto", "ignore", "illegal", "default", "wildcard", "transition"};
         return names[m_e];
     }
+    // VlCovBinKind enumerator naming the bin's set
+    const char* binSetEnum() const {
+        switch (m_e) {
+        case BINS_IGNORE: return "VlCovBinKind::KIND_IGNORE";
+        case BINS_ILLEGAL: return "VlCovBinKind::KIND_ILLEGAL";
+        case BINS_DEFAULT: return "VlCovBinKind::KIND_DEFAULT";
+        default: return "VlCovBinKind::KIND_NORMAL";
+        }
+    }
+    // Normal bins (feed coverage) are anything but ignore/illegal/default
+    bool binIsNormal() const {
+        return m_e != BINS_IGNORE && m_e != BINS_ILLEGAL && m_e != BINS_DEFAULT;
+    }
 };
 constexpr bool operator==(const VCoverBinsType& lhs, VCoverBinsType::en rhs) {
     return lhs.m_e == rhs;
@@ -1398,6 +1428,7 @@ public:
         ET_EVENT,  // VlEventBase::isFired
         // Involving an expression
         ET_TRUE,
+        ET_INITIAL_NBA,  // Event that is fired initially and never again
         //
         ET_COMBO,  // Sensitive to all combo inputs to this block
         ET_COMBO_STAR,  // Sensitive to all combo inputs to this block (from .*)
@@ -1416,6 +1447,7 @@ public:
             true,  // ET_NEGEDGE
             true,  // ET_EVENT
             true,  // ET_TRUE
+            true,  // ET_INITIAL_NBA
 
             false,  // ET_COMBO
             false,  // ET_COMBO_STAR
@@ -1439,14 +1471,14 @@ public:
     }
     const char* ascii() const {
         static const char* const names[]
-            = {"CHANGED",    "BOTH",   "POS",    "NEG",     "EVENT", "TRUE", "COMBO",
-               "COMBO_STAR", "HYBRID", "STATIC", "INITIAL", "FINAL", "NEVER"};
+            = {"CHANGED", "BOTH",       "POS",    "NEG",    "EVENT",   "TRUE",  "ET_INITIAL_NBA",
+               "COMBO",   "COMBO_STAR", "HYBRID", "STATIC", "INITIAL", "FINAL", "NEVER"};
         return names[m_e];
     }
     const char* verilogKwd() const {
-        static const char* const names[]
-            = {"[changed]", "edge",     "posedge",  "negedge",   "[event]", "[true]", "*",
-               "*",         "[hybrid]", "[static]", "[initial]", "[final]", "[never]"};
+        static const char* const names[] = {
+            "[changed]", "edge", "posedge",  "negedge",  "[event]",   "[true]",  "[initial_nba]",
+            "*",         "*",    "[hybrid]", "[static]", "[initial]", "[final]", "[never]"};
         return names[m_e];
     }
     // Return true iff this and the other have mutually exclusive transitions

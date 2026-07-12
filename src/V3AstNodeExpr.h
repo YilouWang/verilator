@@ -73,6 +73,9 @@ public:
     // Returns an error message if widthMin() is not correct otherwise returns nullptr like
     // broken()
     virtual const char* widthMismatch() const VL_MT_STABLE { return nullptr; }
+
+    // S-expression inspired dump of node and operands for debugging
+    std::string patternString(uint32_t depth = 0) const;
 };
 class AstNodeBiop VL_NOT_FINAL : public AstNodeExpr {
     // Binary expression
@@ -1855,6 +1858,22 @@ public:
     bool index() const { return m_index; }
     bool isExprCoverageEligible() const override { return false; }
 };
+class AstMatchMasked final : public AstNodeExpr {
+    // This is a non-source construct, created internally to represent
+    // some case statements. It is a '(mask & _) == bits' matching loop
+    // where {mask, bits} pairs are packed into a single wide 'matchp',
+    // and the result is the index of the first matching entry.
+    // See VL_DECODER_* runtime functions.
+    // @astgen op1 := lhsp : AstNodeExpr
+    // @astgen op2 := matchp : AstVarRef
+public:
+    inline AstMatchMasked(FileLine* fl, AstNodeExpr* lhsp, AstVarScope* matchp);
+    ASTGEN_MEMBERS_AstMatchMasked;
+    string emitVerilog() override { V3ERROR_NA_RETURN(""); }
+    string emitC() override { return "VL_MATCHMASKED_%lq(%lw, %li, %ri)"; }
+    bool cleanOut() const override { return true; }
+    static uint32_t fold(const V3Number& lhs, AstVar* matchVarp);
+};
 class AstMatches final : public AstNodeExpr {
     // "matches" operator: "expr matches pattern"
     // @astgen op1 := lhsp : AstNodeExpr  // Expression to match
@@ -2225,6 +2244,23 @@ public:
     bool sameNode(const AstNode* /*samep*/) const override { return true; }
     bool isSystemFunc() const override { return true; }
 };
+class AstSClocked final : public AstNodeExpr {
+    // Sequence expression with an explicit leading clocking event
+    // IEEE 1800-2023 16.7: sequence_expr ::= clocking_event sequence_expr
+    // The clocking event is hoisted to the enclosing assertion clock by V3AssertNfa.
+    // @astgen op1 := sensesp : AstSenItem
+    // @astgen op2 := exprp : AstNodeExpr
+public:
+    AstSClocked(FileLine* fl, AstSenItem* sensesp, AstNodeExpr* exprp)
+        : ASTGEN_SUPER_SClocked(fl) {
+        this->sensesp(sensesp);
+        this->exprp(exprp);
+    }
+    ASTGEN_MEMBERS_AstSClocked;
+    string emitVerilog() override { V3ERROR_NA_RETURN(""); }
+    string emitC() override { V3ERROR_NA_RETURN(""); }
+    bool cleanOut() const override { V3ERROR_NA_RETURN(false); }
+};
 class AstSConsRep final : public AstNodeExpr {
     // Consecutive repetition [*N], [*N:M], [+], [*] (IEEE 1800-2023 16.9.2)
     // op1 := exprp -- the repeated expression
@@ -2519,9 +2555,10 @@ class AstSampled final : public AstNodeExpr {
     // Verilog $sampled
     // @astgen op1 := exprp : AstNode<AstNodeExpr|AstPropSpec>
 public:
-    AstSampled(FileLine* fl, AstNode* exprp)
+    AstSampled(FileLine* fl, AstNode* exprp, AstNodeDType* dtypep)
         : ASTGEN_SUPER_Sampled(fl) {
         this->exprp(exprp);
+        this->dtypep(dtypep);
     }
     ASTGEN_MEMBERS_AstSampled;
     string emitVerilog() override { return "$sampled(%l)"; }
@@ -2906,6 +2943,9 @@ public:
     string emitVerilog() override { V3ERROR_NA_RETURN(""); }
     string emitC() override { V3ERROR_NA_RETURN(""); }
     string emitSimpleOperator() override { V3ERROR_NA_RETURN(""); }
+    string verilogKwd() const override {
+        return (isStrong() ? "s_" : string()) + "until" + (isOverlapping() ? "_with" : "");
+    }
     bool cleanOut() const override { V3ERROR_NA_RETURN(""); }
     int instrCount() const override { return widthInstrs(); }
     bool sameNode(const AstNode* /*samep*/) const override { return true; }
@@ -5697,6 +5737,22 @@ public:
     void dump(std::ostream& str) const override;
     void dumpJson(std::ostream& str) const override;
 };
+class AstMostSetBitP1 final : public AstNodeUniop {
+    // Most-significant set bit plus one (bit-width); 0 if value is zero
+public:
+    AstMostSetBitP1(FileLine* fl, AstNodeExpr* lhsp)
+        : ASTGEN_SUPER_MostSetBitP1(fl, lhsp) {
+        dtypeSetInteger2State();
+    }
+    ASTGEN_MEMBERS_AstMostSetBitP1;
+    void numberOperate(V3Number& out, const V3Number& lhs) override { out.opMostSetBitP1(lhs); }
+    string emitVerilog() override { return "%f$mostsetbitp1(%l)"; }
+    string emitC() override { return "VL_MOSTSETBITP1_%lq(%lW, %P, %li)"; }
+    bool cleanOut() const override { return true; }
+    bool cleanLhs() const override { return true; }
+    bool sizeMattersLhs() const override { return false; }
+    int instrCount() const override { return widthInstrs() * 16; }
+};
 class AstNToI final : public AstNodeUniop {
     // String to any-size integral
 public:
@@ -5784,6 +5840,7 @@ public:
 };
 class AstOneHot final : public AstNodeUniop {
     // True if only single bit set in vector
+    // @astgen makeDfgVertex
 public:
     AstOneHot(FileLine* fl, AstNodeExpr* lhsp)
         : ASTGEN_SUPER_OneHot(fl, lhsp) {
@@ -5801,6 +5858,7 @@ public:
 };
 class AstOneHot0 final : public AstNodeUniop {
     // True if only single bit, or no bits set in vector
+    // @astgen makeDfgVertex
 public:
     AstOneHot0(FileLine* fl, AstNodeExpr* lhsp)
         : ASTGEN_SUPER_OneHot0(fl, lhsp) {
