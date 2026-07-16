@@ -108,6 +108,17 @@ int AstNodeSel::bitConst() const {
     return (constp ? constp->toSInt() : 0);
 }
 
+bool AstNode::isDisableQueuePushSelfStmt() const {
+    // Detect LinkJump-generated registration:
+    // __VprocessQueue_*.push_back(std::process::self())
+    const AstStmtExpr* const stmtExprp = VN_CAST(this, StmtExpr);
+    if (!stmtExprp) return false;
+    const AstCMethodHard* const methodp = VN_CAST(stmtExprp->exprp(), CMethodHard);
+    if (!methodp || methodp->name() != "push_back") return false;
+    const AstVarRef* const queueRefp = VN_CAST(methodp->fromp(), VarRef);
+    return queueRefp && queueRefp->varp()->processQueue();
+}
+
 void AstNodeStmt::dump(std::ostream& str) const { this->AstNode::dump(str); }
 void AstNodeStmt::dumpJson(std::ostream& str) const { dumpJsonGen(str); }
 
@@ -468,6 +479,14 @@ void AstSConsRep::dumpJson(std::ostream& str) const {
     dumpJsonBoolFuncIf(str, unbounded);
     dumpJsonGen(str);
 }  // LCOV_EXCL_STOP
+void AstSAnd::dump(std::ostream& str) const {
+    this->AstNodeExpr::dump(str);
+    if (propertyControl()) str << " [PROPERTY_CONTROL]";
+}
+void AstSAnd::dumpJson(std::ostream& str) const {
+    dumpJsonBoolFuncIf(str, propertyControl);
+    dumpJsonGen(str);
+}
 void AstPropAlways::dump(std::ostream& str) const {
     this->AstNodeExpr::dump(str);
     if (isStrong()) str << " [strong]";
@@ -2231,12 +2250,14 @@ void AstNodeCoverOrAssert::dump(std::ostream& str) const {
     str << " ["s + this->userType().ascii() + "]";
     if (immediate()) str << " [IMMEDIATE]";
     if (senFromAlways()) str << " [SENALW]";
+    if (nfaLowered()) str << " [NFA]";
 }
 void AstNodeCoverOrAssert::dumpJson(std::ostream& str) const {
     dumpJsonStr(str, "type", "["s + this->userType().ascii() + "]");
     dumpJsonGen(str);
     dumpJsonBoolFuncIf(str, immediate);
     dumpJsonBoolFuncIf(str, senFromAlways);
+    dumpJsonBoolFuncIf(str, nfaLowered);
 }
 void AstCover::dump(std::ostream& str) const {
     this->AstNodeCoverOrAssert::dump(str);
