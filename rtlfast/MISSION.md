@@ -104,9 +104,12 @@ Correctness is decided by the oracle, never by you.
 ## Limits of the sandbox
 
 Ubuntu 24.04, x86_64, up to 8 GB RAM and 10 GB disk, fresh on every run.
-Network is limited to package registries and GitHub. Run long builds in the
-background and poll; keep the disk tidy (delete build directories you no
-longer need). Do not try to reach other hosts.
+The network is open: you may read papers, documentation and open-source code
+anywhere (for example the ESSENT, GSIM, RepCut and Arcilator papers and
+repositories) and download open-source benchmark designs. Do not upload code or
+data anywhere except the `rtlfast` branch of the fork, and do not create
+accounts. Run long builds in the background and poll; keep the disk tidy
+(delete build directories you no longer need).
 
 ## Upstreaming
 
