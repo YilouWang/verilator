@@ -1,1 +1,4 @@
 bench/*/src/
+platform/state.json
+platform/*.txt
+__pycache__/
