@@ -220,9 +220,10 @@ def cmd_update_oracle(a):
         if path in existing:
             full = c.beta.memory_stores.memories.retrieve(memory_id=existing[path].id, memory_store_id=sid)
             if getattr(full, "content", None) != content:
-                c.beta.memory_stores.memories.update(memory_id=existing[path].id, memory_store_id=sid,
-                                                     content=content)
-                print("updated", path)
+                # Replace rather than update: in-place updates were seen spliced in sandbox mounts.
+                c.beta.memory_stores.memories.delete(existing[path].id, memory_store_id=sid)
+                c.beta.memory_stores.memories.create(sid, path=path, content=content)
+                print("replaced", path)
         else:
             c.beta.memory_stores.memories.create(sid, path=path, content=content)
             print("created", path)

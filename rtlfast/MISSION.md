@@ -77,10 +77,13 @@ Correctness is decided by the oracle, never by you.
    least every 45 minutes of work.
 5. Record negative results as carefully as positive ones. An idea that did not
    pay off is useful knowledge.
-6. Before the run ends (you will be paused when the run budget is reached, so
-   do this early, not at the last moment): update `STATE.md`, write the
-   Chinese `REPORT.md` section for this run (what changed, numbers with their
-   verdict paths, what failed, what is next), push, and release the lock.
+6. Report as you go. The run budget stops you without warning, mid-step
+   (the first run was cut off before it wrote any report). So treat every
+   push as possibly your last: with each push, update `STATE.md` and the
+   Chinese `REPORT.md` section for this run (newest run on top: what changed,
+   numbers with their verdict paths, what failed, what is next). If you reach
+   a natural end before the budget, release the lock with
+   `rtlfast/scripts/unlock.sh`; otherwise the heartbeat lock expires by itself.
 
 ## Suggested roadmap (adapt it as you learn)
 
