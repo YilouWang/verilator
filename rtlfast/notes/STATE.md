@@ -4,7 +4,7 @@ Where things stand and what comes next. Overwrite this file at the end of every 
 
 - Phase: P1 done (option + subset checker), P2 in progress (activity-driven nba evaluation).
 - Last verified HEAD: see LEDGER.md (latest line with a PASS verdict). As of run 2:
-  0d92231, gate PASS, rocket 3.28x faster, smallboom 0.84x (slower).
+  791bf29, gate PASS, rocket 3.26x faster, smallboom 1.82x faster.
 
 ## What exists
 - `--rtl-fast` option (src/V3Options.*), docs in docs/guide/exe_verilator.rst, bin/verilator help.
@@ -29,14 +29,14 @@ Where things stand and what comes next. Overwrite this file at the end of every 
 
 ## Measurements (see LEDGER for verdict paths)
 - rocket: stock ~157k Ir/cycle, v1 77k, v2 29k. perf 3.28x (56k -> 184k cycles/s).
-- smallboom: v2 117k Ir/cycle, perf 0.84x (slower than stock!). Being investigated.
+- smallboom: v2 117k Ir/cycle but 0.84x (branch mispredictions at write-site compares); branch-free change bits (791bf29): 1.82x. rocket Ir rose to 43k but time unchanged (3.26x).
 - Build: DUT C++ make is 3x faster than stock (many small functions), but numbers in verdicts
   are polluted by ccache hits (ref make sometimes 24 s); use CCACHE_DISABLE=1 for build studies.
 - Coverage drops slightly (0.992 rocket) because V3Localize localizes comb temporaries that
   now live inside one partition function.
 
 ## Next steps
-1. smallboom slowdown: compare stock and v2 profiles (callgrind) and fix.
+1. Marking variants (per-output branch at partition end, any-change guard) to cut the extra Ir; disable DFG binToOneHot under --rtl-fast.
 2. Cheaper flag checks (bitmap words, skip 64 partitions at once) to allow smaller partitions.
 3. Robustness: test_regress vlt scenario with `--rtl-fast` on self-checking tests.
 4. P3: dedicated eval for designs whose clocks are top-level inputs.
