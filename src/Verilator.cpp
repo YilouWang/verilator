@@ -497,6 +497,9 @@ static void process() {
             V3Const::constifyAll(v3Global.rootp());
             V3Dead::deadifyAllScoped(v3Global.rootp());
 
+            // Make the 'nba' region activity driven
+            if (v3Global.opt.rtlFast()) V3RtlFast::gateActivity(v3Global.rootp());
+
             // Create tracing logic, since we ripped out some signals the user might want to trace
             // Note past this point, we presume traced variables won't move between CFuncs
             // (It's OK if untraced temporaries move around, or vars

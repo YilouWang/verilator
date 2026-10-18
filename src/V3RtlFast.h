@@ -28,6 +28,8 @@ class V3RtlFast final {
 public:
     // Reject input outside the synthesizable synchronous subset (after linking)
     static void checkSubset(AstNetlist* nodep) VL_MT_DISABLED;
+    // Gate the 'nba' region logic on input activity (after scheduling)
+    static void gateActivity(AstNetlist* nodep) VL_MT_DISABLED;
 };
 
 #endif  // Guard
