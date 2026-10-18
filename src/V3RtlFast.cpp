@@ -715,29 +715,30 @@ class RtlFastGate final {
         const RtlFastAccessVisitor visitor{exprp};
         return !visitor.m_impure && !visitor.m_unknownp && !visitor.m_calls;
     }
-    // Compare at each assignment: 'lhs = rhs' becomes
-    // 'tmp = rhs; if (lhs != tmp) { lhs = tmp; mark consumers }'
-    void addWriteSiteCompare(AstNodeAssign* assignp, const VarInfo& info) {
+    // Change detection is branch free: each output has a change bit, set at
+    // its write sites ('tmp = rhs; ch |= lhs != tmp; lhs = tmp'), or by
+    // comparing with a snapshot; at the end each consumer flag of the
+    // partition is ORed with the change bits of the outputs it reads.
+    void addWriteSiteCompare(AstNodeAssign* assignp, AstVarScope* changep) {
         FileLine* const flp = assignp->fileline();
         AstNodeExpr* const lhsp = assignp->lhsp();
         AstNodeExpr* const oldp = lhsp->cloneTree(false);
         oldp->foreach([](AstVarRef* refp) { refp->access(VAccess::READ); });
         AstNodeExpr* newp;
-        AstNode* prep = nullptr;
         if (VN_IS(assignp->rhsp(), VarRef) || VN_IS(assignp->rhsp(), Const)) {
             newp = assignp->rhsp()->cloneTree(false);
         } else {
             AstVarScope* const tempp = newTemp("wr", lhsp->dtypep());
-            prep = new AstAssign{flp, new AstVarRef{flp, tempp, VAccess::WRITE},
-                                 assignp->rhsp()->unlinkFrBack()};
+            assignp->addHereThisAsNext(new AstAssign{flp,
+                                                     new AstVarRef{flp, tempp, VAccess::WRITE},
+                                                     assignp->rhsp()->unlinkFrBack()});
             assignp->rhsp(new AstVarRef{flp, tempp, VAccess::READ});
             newp = new AstVarRef{flp, tempp, VAccess::READ};
         }
-        AstIf* const ifp = new AstIf{flp, new AstNeq{flp, oldp, newp}};
-        assignp->replaceWith(ifp);
-        ifp->addThensp(assignp);
-        ifp->addThensp(markConsumers(flp, info));
-        if (prep) ifp->addHereThisAsNext(prep);
+        assignp->addHereThisAsNext(
+            new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
+                          new AstOr{flp, new AstVarRef{flp, changep, VAccess::READ},
+                                    new AstNeq{flp, oldp, newp}}});
         ++m_nWriteSites;
     }
     // Add change detection of the outputs of a partition to its function
@@ -767,28 +768,44 @@ class RtlFastGate final {
         }
         AstNode* prep = nullptr;
         AstNode* postp = nullptr;
+        std::map<int, AstNodeExpr*> flagChanges;  // Consumer flag -> OR of change bits
         for (AstVarScope* const vscp : part.m_outs) {
             const VarInfo& info = varInfo(vscp);
             if (info.m_consumerFlags.empty()) continue;
-            const auto it = sites.find(vscp);
-            if (it != sites.end()) {
-                for (AstNodeAssign* const assignp : it->second) addWriteSiteCompare(assignp, info);
-                continue;
-            }
-            if (!comparable(vscp->dtypep())) {
+            if (!comparable(vscp->dtypep()) && !sites.count(vscp)) {
                 // Conservatively changed whenever the writer runs
                 postp = append(postp, markConsumers(flp, info));
                 continue;
             }
-            AstVarScope* const oldp = newTemp("old", vscp->dtypep());
-            prep = AstNode::addNext(prep, new AstAssign{flp, new AstVarRef{flp, oldp, VAccess::WRITE},
-                                                        new AstVarRef{flp, vscp, VAccess::READ}});
-            AstIf* const ifp
-                = new AstIf{flp, new AstNeq{flp, new AstVarRef{flp, vscp, VAccess::READ},
-                                            new AstVarRef{flp, oldp, VAccess::READ}}};
-            ifp->addThensp(markConsumers(flp, info));
-            postp = AstNode::addNext(postp, ifp);
-            ++m_nSnapshots;
+            AstVarScope* const changep = newTemp("ch", m_netlistp->findBitDType());
+            prep = AstNode::addNext(prep, new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
+                                                        new AstConst{flp, AstConst::BitFalse{}}});
+            const auto it = sites.find(vscp);
+            if (it != sites.end()) {
+                for (AstNodeAssign* const assignp : it->second) {
+                    addWriteSiteCompare(assignp, changep);
+                }
+            } else {
+                AstVarScope* const oldp = newTemp("old", vscp->dtypep());
+                prep = AstNode::addNext(prep, new AstAssign{flp, new AstVarRef{flp, oldp, VAccess::WRITE},
+                                                            new AstVarRef{flp, vscp, VAccess::READ}});
+                postp = AstNode::addNext(
+                    postp, new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
+                                         new AstNeq{flp, new AstVarRef{flp, vscp, VAccess::READ},
+                                                    new AstVarRef{flp, oldp, VAccess::READ}}});
+                ++m_nSnapshots;
+            }
+            for (const int flag : info.m_consumerFlags) {
+                AstNodeExpr*& exprp = flagChanges[flag];
+                AstNodeExpr* const bitp = new AstVarRef{flp, changep, VAccess::READ};
+                exprp = exprp ? new AstOr{flp, exprp, bitp} : bitp;
+            }
+        }
+        for (const auto& pair : flagChanges) {
+            postp = AstNode::addNext(
+                postp, new AstAssign{flp, flagRef(flp, pair.first, VAccess::WRITE),
+                                     new AstOr{flp, flagRef(flp, pair.first, VAccess::READ),
+                                               pair.second}});
         }
         if (prep) funcp->stmtsp()->addHereThisAsNext(prep);
         if (postp) funcp->addStmtsp(postp);
