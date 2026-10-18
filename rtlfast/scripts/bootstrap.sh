@@ -21,15 +21,35 @@ echo "rtlfast: bootstrap start $(stamp) jobs=$JOBS repo=$REPO"
 
 # 1. Lock (one run at a time; the journal store is shared and live).
 if [ -d "$JOURNAL" ]; then
+  # A live run refreshes the lock every 5 minutes (heartbeat below), so a lock
+  # whose heartbeat is older than LOCK_HB_TTL_S belongs to a dead sandbox.
+  # Locks without a heartbeat field come from older runs and use LOCK_TTL_S.
   if [ -f "$JOURNAL/lock.json" ] && [ "${RTLFAST_FORCE_LOCK:-0}" != 1 ]; then
-    held=$(python3 -c "import json,time;d=json.load(open('$JOURNAL/lock.json'));print(int(time.time()-d.get('t',0)))" 2>/dev/null || echo 999999)
-    if [ "$held" -lt "$LOCK_TTL_S" ]; then
-      echo "rtlfast: LOCKED by another run (held ${held}s). Stop this run without changes."
+    verdict=$(python3 -c "
+import json,time
+d=json.load(open('$JOURNAL/lock.json'))
+age=int(time.time()-d.get('t',0))
+ttl=${RTLFAST_LOCK_HB_TTL_S:-1200} if d.get('hb') else $LOCK_TTL_S
+print(('held' if age<ttl else 'stale'), age)" 2>/dev/null || echo "stale 999999")
+    if [ "${verdict%% *}" = held ]; then
+      echo "rtlfast: LOCKED by another run (last heartbeat ${verdict#* }s ago). Stop this run without changes."
       exit 3
     fi
   fi
-  python3 -c "import json,time,socket;json.dump({'t':time.time(),'host':socket.gethostname(),'since':'$(stamp)'},open('$JOURNAL/lock.json','w'))"
-  echo "rtlfast: lock taken"
+  RUN_ID="$(hostname)-$$-$(date +%s)"
+  echo "$RUN_ID" > /tmp/rtlfast-run-id
+  python3 -c "import json,time;json.dump({'t':time.time(),'hb':1,'run':'$RUN_ID','since':'$(stamp)'},open('$JOURNAL/lock.json','w'))"
+  # Heartbeat: lives as long as this sandbox, stops once the lock is released
+  # or taken over by another run.
+  nohup bash -c "while sleep 300; do python3 -c \"
+import json,time,sys
+p='$JOURNAL/lock.json'
+try: d=json.load(open(p))
+except Exception: sys.exit(1)
+if d.get('run')!='$RUN_ID': sys.exit(1)
+d['t']=time.time(); json.dump(d,open(p,'w'))\" || break; done" > /dev/null 2>&1 &
+  echo $! > /tmp/rtlfast-heartbeat.pid
+  echo "rtlfast: lock taken ($RUN_ID)"
 else
   echo "rtlfast: WARNING journal store $JOURNAL not mounted, running without lock"
 fi
