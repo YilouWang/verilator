@@ -1,0 +1,47 @@
+{
+ "kind": "check",
+ "design": "rocket-mutant-selftest",
+ "cycles": 200000,
+ "seed": 1,
+ "verdict": "FAIL",
+ "digest_equal": false,
+ "first_mismatch_cycle": 188401,
+ "mismatched_members_first50": [
+  "TestHarness__DOT__ldut__DOT__tile_prci_domain__DOT__element_reset_domain_rockettile__DOT__core__DOT__alu__DOT__io_adder_out",
+  "TestHarness__DOT__ldut__DOT__tile_prci_domain__DOT__element_reset_domain_rockettile__DOT__core__DOT__alu__DOT__out",
+  "TestHarness__DOT__ldut__DOT__tile_prci_domain__DOT__element_reset_domain_rockettile__DOT__dcacheArb__DOT__io_mem_req_bits_addr"
+ ],
+ "mismatched_member_count": 3,
+ "design_text_equal": true,
+ "ref_exit": 0,
+ "dut_exit": 0,
+ "coverage": {
+  "ref_members": 5921,
+  "dut_members": 5920,
+  "common": 5920,
+  "coverage": 0.9998311096098632,
+  "missing_in_dut_first50": [
+   "TestHarness__DOT__ldut__DOT__sbus__DOT__coupler_to_port_named_mmio_port_axi4__DOT__tl2axi4__DOT___dec_T_9"
+  ]
+ },
+ "min_coverage": 0.95,
+ "ref_root_rev": "54730b2e3a6d91584a1df8012398823dc756480d",
+ "dut_root_rev": "54730b2e3a6d91584a1df8012398823dc756480d",
+ "dut_flags": [],
+ "build_times_s": {
+  "ref_verilate_s": 6.709234237670898,
+  "dut_verilate_s": 6.384557723999023,
+  "ref_make_s": 279.5539255142212,
+  "dut_make_s": 281.2925832271576
+ },
+ "run_times_s": {
+  "ref": 44.279189348220825,
+  "dut": 43.264795541763306
+ },
+ "oracle_sha256": {
+  "harness.cpp": "b645b43b3eb84e95382d4773d424689b429beb3a871be58d8ac067e0fcb85ad2",
+  "gen_probes.py": "a53b70e5e455caadf8b9abbe79b5edd77d209131fdc1e7d867b190eb3b216ea0",
+  "vlhdr.py": "8055bd5026dd31d07aba52dba6dd361edf146fb39f3e99ecca6138b4f298d1b2",
+  "lockstep.py": "cbfae17c8fbfe6839f8bc7c49becc0d6cb439045bfda87c1a143934cc273eda8"
+ }
+}

@@ -1,0 +1,11 @@
+{
+  "min_coverage": 0.95,
+  "check": [
+    {"design": "bench/rocket/design.json", "cycles": 300000, "seeds": [1]},
+    {"design": "bench/smallboom/design.json", "cycles": 150000, "seeds": [1]}
+  ],
+  "perf": [
+    {"design": "bench/rocket/design.json", "cycles": 1000000, "repeat": 5},
+    {"design": "bench/smallboom/design.json", "cycles": 300000, "repeat": 5}
+  ]
+}

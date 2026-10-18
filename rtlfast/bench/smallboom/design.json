@@ -1,0 +1,14 @@
+{
+  "name": "smallboom",
+  "top": "TestHarness",
+  "sources": ["src/TestHarness-SmallBoom.sv"],
+  "verilator_flags": ["--max-num-width", "1048576", "+define+RANDOMIZE_GARBAGE_ASSIGN"],
+  "clock": "clock",
+  "reset": "reset",
+  "reset_active": 1,
+  "reset_cycles": 10,
+  "preload": [
+    {"member": "TestHarness__DOT__mem__DOT__srams__DOT__mem_ext__DOT__Memory", "file": "src/linux.bin"}
+  ],
+  "workload": "first N cycles of the GSIM ready-to-run Linux boot image"
+}
