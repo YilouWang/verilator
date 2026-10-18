@@ -1914,6 +1914,13 @@ Summary:
    Run Verilator and record with the :command:`rr` command. See
    `https://rr-project.org <https://rr-project.org>`_.
 
+.. option:: --rtl-fast
+
+   Experimental. Optimize the model for large synthesizable, synchronous
+   RTL designs. The design must not use timing controls, fork, classes,
+   DPI or user C code (:code:`$c`); such input is rejected with an error.
+   Cannot be used with :vlopt:`--timing` or :vlopt:`--threads` above 1.
+
 .. option:: --runtime-debug
 
    Enable including debug assertions in the generated model. This may

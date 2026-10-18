@@ -1,0 +1,23 @@
+%Error: t/t_rtl_fast_unsup.v:15:31: Unsupported: --rtl-fast does not support DPI functions or tasks
+   15 |   import "DPI-C" function int dpi_f(int a);
+      |                               ^~~~~
+        ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.
+%Error: t/t_rtl_fast_unsup.v:19:5: Unsupported: --rtl-fast does not support timing controls (delays, event controls or wait)
+   19 |     #1 cyc <= 0;
+      |     ^
+%Error: t/t_rtl_fast_unsup.v:20:5: Unsupported: --rtl-fast does not support timing controls (delays, event controls or wait)
+   20 |     @(negedge clk);
+      |     ^
+%Error: t/t_rtl_fast_unsup.v:21:5: Unsupported: --rtl-fast does not support timing controls (delays, event controls or wait)
+   21 |     wait (cyc == 3);
+      |     ^~~~
+%Error: t/t_rtl_fast_unsup.v:22:5: Unsupported: --rtl-fast does not support fork
+   22 |     fork
+      |     ^~~~
+%Error: t/t_rtl_fast_unsup.v:25:5: Unsupported: --rtl-fast does not support $c statements
+   25 |     $c("int x;");
+      |     ^~
+%Error: t/t_rtl_fast_unsup.v:8:1: Unsupported: --rtl-fast does not support classes
+    8 | class Cls;
+      | ^~~~~
+%Error: Exiting due to

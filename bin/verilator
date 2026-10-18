@@ -567,6 +567,7 @@ detailed descriptions of these arguments.
     --replication-limit <value> Replication concatenation limit (default: 8k)
     --report-unoptflat          Extra diagnostics for UNOPTFLAT
     --rr                        Run Verilator and record with rr
+    --rtl-fast                  Optimize for synchronous RTL (experimental)
     --runtime-debug             Enable model runtime debugging
     --savable                   Enable model save-restore
     --sc                        Create SystemC output

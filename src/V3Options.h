@@ -329,6 +329,7 @@ private:
     bool m_quietStats = false;      // main switch: --quiet-stats
     bool m_relativeIncludes = false;  // main switch: --relative-includes
     bool m_reportUnoptflat = false;  // main switch: --report-unoptflat
+    bool m_rtlFast = false;         // main switch: --rtl-fast
     bool m_savable = false;         // main switch: --savable
     VOptionBool m_schedZeroDelay;  // main switch: --sched-zero-delay
     bool m_stdPackage = true;       // main switch: --std-package
@@ -663,6 +664,7 @@ public:
     bool quietExit() const VL_MT_SAFE { return m_quietExit; }
     bool quietStats() const VL_MT_SAFE { return m_quietStats; }
     bool reportUnoptflat() const { return m_reportUnoptflat; }
+    bool rtlFast() const { return m_rtlFast; }
     bool verilate() const { return m_verilate; }
     bool vpi() const { return m_vpi.isTrue(); }
     bool waiverMultiline() const { return m_waiverMultiline; }

@@ -1069,6 +1069,10 @@ void V3Options::notify() VL_MT_DISABLED {
     if (coverage() && savable()) {
         cmdfl->v3error("Unsupported: --coverage and --savable not supported together");
     }
+    if (rtlFast()) {
+        if (timing().isSetTrue()) cmdfl->v3error("Unsupported: --rtl-fast with --timing");
+        if (threads() > 1) cmdfl->v3error("Unsupported: --rtl-fast with --threads above 1");
+    }
     if (v3Global.opt.timing().isSetTrue() && savable()) {
         cmdfl->v3error("Unsupported: --timing and --savable not supported together");
     }
@@ -1796,6 +1800,7 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
         if (m_replicationLimit < 0) fl->v3error("--replication-limit must be >= 0: " << valp);
     });
     DECL_OPTION("-rr", CbCall, []() {});  // Processed only in bin/verilator shell
+    DECL_OPTION("-rtl-fast", OnOff, &m_rtlFast);
     DECL_OPTION("-runtime-debug", CbCall, [this, fl]() {
         decorations(fl, "node");
         addCFlags("-ggdb");

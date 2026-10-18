@@ -14,7 +14,7 @@ DIRTY=""; git -C "$REPO" diff --quiet -- src include || DIRTY="-dirty"
 OUT="$K/results/$(date -u +%Y%m%d)-$SHA$DIRTY"
 mkdir -p "$OUT"
 DUTFLAG=()
-if grep -q '"rtl-fast"' "$REPO/src/V3Options.cpp" 2>/dev/null; then DUTFLAG=(--dut-flag=--rtl-fast); fi
+if grep -qE '"-?rtl-fast"' "$REPO/src/V3Options.cpp" 2>/dev/null; then DUTFLAG=(--dut-flag=--rtl-fast); fi
 
 status=0
 python3 - "$K/GATE.json" "$MODE" > "$WORK/gate-plan.txt" <<'EOF'

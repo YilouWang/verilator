@@ -97,6 +97,7 @@
 #include "V3Randomize.h"
 #include "V3Reloop.h"
 #include "V3Reorder.h"
+#include "V3RtlFast.h"
 #include "V3Sampled.h"
 #include "V3Sched.h"
 #include "V3Scope.h"
@@ -175,6 +176,8 @@ static void process() {
         // Convert --/++ to normal operations. Must be after LinkJump.
         V3LinkInc::linkIncrements(v3Global.rootp());
         V3Error::abortIfErrors();
+        // Reject input outside the --rtl-fast subset
+        if (v3Global.opt.rtlFast()) V3RtlFast::checkSubset(v3Global.rootp());
 
         if (v3Global.opt.stats()) V3Stats::statsStageAll(v3Global.rootp(), "Link");
 

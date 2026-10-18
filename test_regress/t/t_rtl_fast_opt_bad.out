@@ -1,0 +1,4 @@
+%Error: Unsupported: --rtl-fast with --timing
+        ... See the manual at https://verilator.org/verilator_doc.html?v=5.053 for more assistance.
+%Error: Unsupported: --rtl-fast with --threads above 1
+%Error: Exiting due to 2 error(s)
