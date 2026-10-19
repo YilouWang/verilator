@@ -281,6 +281,11 @@ class RtlFastGate final {
     // Gated partitions up to this size are evaluated in bundles of up to BUNDLE_SIZE
     static constexpr size_t BUNDLE_MEMBER_SIZE = 150;
     static constexpr size_t BUNDLE_SIZE = 800;
+    // Smaller nba regions (in AST nodes) are not gated: their evaluation fits
+    // in the caches, and with high activity change detection costs more than
+    // skipping saves (e.g. CPU cores of 6k to 40k nodes with random inputs ran
+    // 0.64x to 0.70x as fast gated, at ~1.0x ungated)
+    static constexpr size_t MIN_NODES = 50000;
 
     enum class Kind : uint8_t {
         GATED,  // Pure statements, run when an input changed
@@ -336,6 +341,7 @@ class RtlFastGate final {
     size_t m_partitionSize = PARTITION_SIZE;
     size_t m_bundleMemberSize = BUNDLE_MEMBER_SIZE;
     size_t m_bundleSize = BUNDLE_SIZE;
+    size_t m_minNodes = MIN_NODES;
     size_t m_nBundled = 0;  // Partitions evaluated in bundles
     size_t m_nPersistentTemps = 0;  // Block temporaries made module temporaries
     // Development profiling (VERILATOR_RTLFAST_PROFILE=<map file>): run and change counters
@@ -1184,10 +1190,20 @@ public:
         if (const char* const envp = std::getenv("VERILATOR_RTLFAST_BUNDLE")) {
             m_bundleSize = std::atoi(envp);
         }
+        if (const char* const envp = std::getenv("VERILATOR_RTLFAST_MIN_NODES")) {
+            m_minNodes = std::atoi(envp);
+        }
         AstCFunc* const bodyp = findFunc(netlistp, "_eval_body__nba");
         if (!bodyp || !collect(bodyp)) {
             UINFO(1, "rtl-fast: nba region has an unexpected shape, not gated");
             V3Stats::addStat("RtlFast, gating disabled (shape)", 1);
+            return;
+        }
+        size_t nNodes = 0;
+        for (const Stmt& stmt : m_stmts) nNodes += stmt.m_nodep->nodeCount();
+        if (nNodes < m_minNodes) {
+            UINFO(1, "rtl-fast: nba region of " << nNodes << " nodes, not gated");
+            V3Stats::addStat("RtlFast, gating disabled (small)", 1);
             return;
         }
         if (!analyze()) {

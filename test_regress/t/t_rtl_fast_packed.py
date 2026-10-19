@@ -11,6 +11,9 @@ import vltest_bootstrap
 
 test.scenarios('vlt')
 
+# Gate the small test design
+test.setenv("VERILATOR_RTLFAST_MIN_NODES", "0")
+
 # One partition per statement, so the aggregates are partition outputs
 test.setenv("VERILATOR_RTLFAST_PARTITION_SIZE", "1")
 test.compile(verilator_flags2=["--rtl-fast", "--stats"])

@@ -11,6 +11,9 @@ import vltest_bootstrap
 
 test.scenarios('vlt')
 
+# Gate the small test design
+test.setenv("VERILATOR_RTLFAST_MIN_NODES", "0")
+
 # One partition per statement, so the reader of 'r' is gated on its own
 test.setenv("VERILATOR_RTLFAST_PARTITION_SIZE", "1")
 test.compile(make_top_shell=False,

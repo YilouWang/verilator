@@ -11,6 +11,9 @@ import vltest_bootstrap
 
 test.scenarios('vlt')
 
+# Gate the small test design
+test.setenv("VERILATOR_RTLFAST_MIN_NODES", "0")
+
 test.compile(verilator_flags2=["--rtl-fast", "--stats"])
 
 test.execute(expect_filename=test.golden_filename)
