@@ -67,6 +67,13 @@ Where things stand and what comes next. Overwrite this file at the end of every 
   _eval_body__nba, -fno-stack-protector, producer affinity, other share thresholds and
   RELATED_MIN_SIZE values.
 
+## LargeBoom (proposed for the gate, see GATE_PROPOSALS.md)
+- fb45a89: lockstep 50k PASS (cov 1.0); perf 1.163x only (5.9k -> 6.9k c/s); stock build 29 min,
+  rtl-fast C++ build 6x faster. Scratch setup: design.json from GATE_PROPOSALS.md, sources from
+  difftest/TestHarness-LargeBoom.tar.bz2 of the pinned gsim-ready-to-run commit.
+- 4005 partitions, 1463 runs/cycle, 333k nodes/cycle (188k without output change); per-node cost
+  1.7x that of smallboom (cache pressure). Fission of >= 2000-node statements: no gain.
+
 ## Next steps
 1. smallboom: split huge always_ff statements whose outputs depend on disjoint parts of the
    block (clone the block temporaries each piece needs), so registers whose inputs did not
