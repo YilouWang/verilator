@@ -3,9 +3,8 @@
 Where things stand and what comes next. Overwrite this file at the end of every run.
 
 - Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation).
-- Last perf verdicts: fb45a89 (results/20261019-fb45a89): gate PASS, rocket 4.99x,
-  smallboom 2.57x, coverage 1.0 / 1.0. (84f8f79: 5.19x / 2.56x; 47e82bb: 5.04x / 2.26x;
-  differences between these are within the host noise.)
+- Last perf verdicts: d93d1d3 (results/20261019-d93d1d3): gate PASS, rocket 5.41x,
+  smallboom 2.97x, coverage 1.0 / 1.0. (fb45a89: 4.99x / 2.57x; 84f8f79: 5.19x / 2.56x.)
 - Coverage: under --rtl-fast V3Localize keeps user signals (not internal) as members, so
   coverage no longer depends on partition shapes (47e82bb).
 
@@ -39,6 +38,9 @@ Where things stand and what comes next. Overwrite this file at the end of every 
       V3Localize does not turn them into function locals (needed for bundles).
     - change bits are shared by outputs with identical consumer lists; a partition does not mark
       itself for variables that are its inputs only because of other writers.
+    - partition functions carry AstCFunc::optSize -> VL_ATTR_OPTSIZE (GCC optimize("Os"), clang
+      minsize): the gated model is instruction-fetch bound (smallboom +12-15%; stock gets slower
+      at -Os, so this is specific to the gated code).
     - dev knobs (not for users): VERILATOR_RTLFAST_BUNDLE_MEMBER / _BUNDLE, VERILATOR_RTLFAST_PARTITION_SIZE, VERILATOR_RTLFAST_PROFILE=<map>
       (run/change counters; dump with HARNESS=rtlfast/tools/prof_harness.cpp in tools/build.sh).
 - Tests: t_rtl_fast_unsup, t_rtl_fast_opt_bad, t_rtl_fast_gate (output vs stock golden),

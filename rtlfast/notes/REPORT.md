@@ -5,6 +5,8 @@
 ## 第 3 次运行（2026-10-19 06:02 UTC 起）
 
 ### 结论（随推送更新）
+- 目前最好的 verdict：d93d1d3（results/20261019-d93d1d3），门限 PASS，覆盖率 1.0 / 1.0，rocket 5.406 倍（42.1k 到 227.4k 周期每秒），smallboom 2.969 倍（13.5k 到 40.2k），均为 significance faster。rocket 已进入任务书里 GSIM 的 5.3 到 5.7 倍范围。
+- d93d1d3 的关键发现：门控后的模型受指令获取限制。每个周期运行的是几千个分区函数中不同的一部分，代码大小比指令数更重要。整个 smallboom DUT 用 -Os 编译比 -O2 快 12%，而原版 smallboom 用 -Os 反而慢 33%。所以只对分区函数加 VL_ATTR_OPTSIZE（GCC 的 optimize("Os")，clang 的 minsize），通过新的 AstCFunc::optSize 标志生成；oracle 的编译选项不变（两边都是 -O2）。
 - 启动时 HEAD（b808743）门限 PASS（results/20261019-b808743）。
 - 47e82bb：--rtl-fast 下 V3Localize 不再把用户信号（非内部变量）局部化，覆盖率回到约 1.0（rocket 0.9998，smallboom 1.0）。第 2 次运行末尾记录的同一改动从未提交，已丢失，本次重做。性能 verdict（results/20261019-47e82bb）：rocket 5.038 倍（42.6k 到 214.4k 周期每秒），smallboom 2.262 倍（12.7k 到 28.7k），均为 significance faster，没有可测的代价。
 
