@@ -36,8 +36,10 @@
 //     it again would write the same value.
 //   - Every value change of an input is detected: partitions compare the
 //     written value with the old one at each assignment (or compare their
-//     outputs before and after running), and variables written outside the
-//     nba region are compared with a shadow copy whenever the region starts.
+//     outputs before and after running). Assignments outside the nba region
+//     compare in the same way and mark the consumers where they write; other
+//     variables written outside the region (top inputs, public or DPI-written
+//     variables) are compared with a shadow copy whenever the region starts.
 // If none of the inputs changed since the partition last ran, running it
 // again would write the values its outputs already hold, so it is skipped.
 //
@@ -322,6 +324,9 @@ class RtlFastGate final {
         std::vector<size_t> m_writerParts;  // Partitions writing the variable
         std::vector<int> m_consumerFlags;  // Dirty flags of partitions reading it
         bool m_outside = false;  // Written outside the nba region at run time
+        // Written outside other than by the assignments in m_outsideSites
+        bool m_outsideOther = false;
+        std::vector<AstNodeAssign*> m_outsideSites;  // Outside assignments to the variable
     };
 
     // NODE STATE
@@ -354,6 +359,7 @@ class RtlFastGate final {
     int m_nFlags = 0;
     size_t m_nTemps = 0;
     size_t m_nShadows = 0;
+    size_t m_nOutsideSites = 0;  // Outside assignments detecting changes where they write
     size_t m_nWriteSites = 0;
     size_t m_nSnapshots = 0;
     size_t m_nUncompared = 0;  // Outputs assumed changed whenever their writer runs
@@ -455,16 +461,29 @@ class RtlFastGate final {
                 if (preOnly.count(funcp)) return;
                 if (nbaCallees.count(funcp)) return;
             }
-            // Runs at run time outside the nba statements (or unknown when)
+            // Runs at run time outside the nba statements (or unknown when).
+            // Simple assignments can detect changes where they write.
+            std::set<const AstVarRef*> siteRefs;
+            funcp->foreach([&](AstNodeAssign* assignp) {
+                if (!VN_IS(assignp, Assign) && !VN_IS(assignp, AssignW)) return;
+                AstVarRef* const refp = simpleTarget(assignp->lhsp());
+                if (!refp || !refp->varScopep() || !comparable(assignp->lhsp()->dtypep())) return;
+                varInfo(refp->varScopep()).m_outsideSites.push_back(assignp);
+                siteRefs.insert(refp);
+            });
             funcp->foreach([&](AstNode* nodep) {
                 if (const AstVarRef* const refp = VN_CAST(nodep, VarRef)) {
                     if (refp->access().isWriteOrRW() && refp->varScopep()) {
-                        varInfo(refp->varScopep()).m_outside = true;
+                        VarInfo& info = varInfo(refp->varScopep());
+                        info.m_outside = true;
+                        if (!siteRefs.count(refp)) info.m_outsideOther = true;
                     }
                 } else if (AstCMethodHard* const methodp = VN_CAST(nodep, CMethodHard)) {
                     if (!methodp->isPure()) {
                         methodp->fromp()->foreach([&](const AstVarRef* refp) {
-                            if (refp->varScopep()) varInfo(refp->varScopep()).m_outside = true;
+                            if (!refp->varScopep()) return;
+                            varInfo(refp->varScopep()).m_outside = true;
+                            varInfo(refp->varScopep()).m_outsideOther = true;
                         });
                     }
                 } else if (VN_IS(nodep, CStmtUser) || VN_IS(nodep, CExprUser)) {
@@ -478,6 +497,7 @@ class RtlFastGate final {
             if (varp->isPrimaryInish() || varp->isSigUserRWPublic() || varp->isWrittenByDpi()
                 || varp->isForced()) {
                 varInfo(vscp).m_outside = true;
+                varInfo(vscp).m_outsideOther = true;
             }
         });
         return ok;
@@ -863,7 +883,6 @@ class RtlFastGate final {
             new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
                           new AstOr{flp, new AstVarRef{flp, changep, VAccess::READ},
                                     new AstNeq{flp, oldp, newp}}});
-        ++m_nWriteSites;
     }
     // 'array[index] += condp ? 1 : 0' (or += 1 without condp)
     AstNodeStmt* profCount(FileLine* flp, AstVarScope* arrayp, int index, AstNodeExpr* condp) {
@@ -946,6 +965,7 @@ class RtlFastGate final {
             if (it != sites.end()) {
                 for (AstNodeAssign* const assignp : it->second) {
                     addWriteSiteCompare(assignp, changep);
+                    ++m_nWriteSites;
                 }
             } else {
                 AstVarScope* const oldp = newLocalTemp("old", vscp->dtypep());
@@ -1146,13 +1166,37 @@ class RtlFastGate final {
             UASSERT_OBJ(!funcp->stmtsp(), funcp, "Statements left behind");
             VL_DO_DANGLING(funcp->unlinkFrBack()->deleteTree(), funcp);
         }
-        // Variables changed outside the region: compare with a shadow copy
+        // Variables changed outside the region: compare at the assignments, or
+        // with a shadow copy
         AstNode* prep = nullptr;
         AstNode* postp = nullptr;
         for (size_t v = 0; v < m_vars.size(); ++v) {
             const VarInfo& info = m_vars[v];
             if (!info.m_outside || info.m_consumerFlags.empty()) continue;
             AstVarScope* const vscp = m_varps[v];
+            if (!info.m_outsideOther) {
+                // Compare where the outside assignments write, mark the consumers there
+                for (AstNodeAssign* const assignp : info.m_outsideSites) {
+                    FileLine* const siteFlp = assignp->fileline();
+                    AstVarScope* const changep = newLocalTemp("och", m_netlistp->findBitDType());
+                    assignp->addHereThisAsNext(
+                        new AstAssign{siteFlp, new AstVarRef{siteFlp, changep, VAccess::WRITE},
+                                      new AstConst{siteFlp, AstConst::BitFalse{}}});
+                    addWriteSiteCompare(assignp, changep);
+                    AstNode* marksp = nullptr;
+                    for (const int flag : info.m_consumerFlags) {
+                        marksp = AstNode::addNext(
+                            marksp,
+                            new AstAssign{
+                                siteFlp, flagRef(siteFlp, flag, VAccess::WRITE),
+                                new AstOr{siteFlp, flagRef(siteFlp, flag, VAccess::READ),
+                                          new AstVarRef{siteFlp, changep, VAccess::READ}}});
+                    }
+                    assignp->addNextHere(marksp);
+                    ++m_nOutsideSites;
+                }
+                continue;
+            }
             if (!comparable(vscp->dtypep())) {
                 prep = append(prep, markConsumers(flp, info));
                 continue;
@@ -1246,6 +1290,7 @@ public:
         V3Stats::addStat("RtlFast, change bits", m_nChangeBits);
         V3Stats::addStat("RtlFast, consumer marks", nMarks);
         V3Stats::addStat("RtlFast, outside variables compared", m_nShadows);
+        V3Stats::addStat("RtlFast, outside assignments compared", m_nOutsideSites);
     }
 };
 
