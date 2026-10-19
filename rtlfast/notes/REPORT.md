@@ -5,7 +5,7 @@
 ## 第 2 次运行（2026-10-18 22:10 UTC 起）
 
 ### 结论
-- 当前 HEAD 门限全部 PASS。最新的性能 verdict（1a5b10e，results/20261019-1a5b10e）：rocket 4.565 倍（44.0k 到 200.7k 周期每秒），smallboom 2.407 倍（13.0k 到 31.3k），均为 significance faster。覆盖率 rocket 0.988，smallboom 0.993。
+- 当前 HEAD 门限全部 PASS。最新的性能 verdict（f792bc5，results/20261019-f792bc5）：rocket 4.979 倍（41.3k 到 205.6k 周期每秒），smallboom 2.195 倍（13.6k 到 29.8k），均为 significance faster。上一个 verdict（1a5b10e）：rocket 4.565 倍，smallboom 2.407 倍；smallboom 的差别在运行间噪声之内（DUT 样本 26.2k 到 31.8k）。覆盖率 rocket 0.981，smallboom 0.992，随着分区变大缓慢下降，需要关注。
 - C++ 编译更快（CCACHE_DISABLE=1，-j4）：rocket 原版 verilate 7.1 s 加 make 106.7 s，--rtl-fast 8.2 s 加 46.8 s（总计快 2.07 倍）；smallboom 原版 16.4 s 加 202.5 s，--rtl-fast 19.8 s 加 109.2 s（快 1.70 倍）。
 
 ### 做了什么（按提交顺序）
@@ -22,6 +22,7 @@
 - 109d691：分区亲和切分。分区达到 50 个节点后，若下一条语句与之无关（不读分区写的变量，也不共享一半以上输入），就开新分区。数字见结论。
 - 2f8a8be：限制单个变量产生的消费者标记数。一个变量的标记数等于写者分区数乘读者分区数；t_flag_output_groups_max_size（N=20000，数组被每条语句逐元素读写）在 --rtl-fast 下用掉 9 到 16 GB 内存。现在超过 65536 时读者分区不再门控、总是执行，该测试 7.5 s、223 MB。新增测试 t_rtl_fast_gate（与原版输出金样比较）和 t_rtl_fast_many_marks。门限 PASS（results/20261019-2f8a8be）；该限制在两个门限设计上不触发，生成代码不变，所以没有新的性能运行。
 - 1a5b10e：分区大小上限从 200 提到 800。有了亲和切分以后，更大的分区减少每个分区的固定开销而不会把无关逻辑放在一起（扫描 120/200/400/800/2000：smallboom 26.1k/26.7k/29.3k/29.4k/29.2k，rocket 约 197k/205k/214k/221k/220k 周期每秒）。门限 PASS，数字见结论。
+- f792bc5：深度优先遍历的汇点按其第一个写入变量的层次名排序，使同一模块的逻辑相邻（A/B：rocket 中位数约 223k 对 204k，smallboom 29.5k 对 28.4k）。门限 PASS，数字见结论。
 - 工具：rtlfast/tools/build.sh（用 oracle 的 harness 单独构建基准，检查链接行），rtlfast/tools/prof_harness.cpp。
 
 ### 测量

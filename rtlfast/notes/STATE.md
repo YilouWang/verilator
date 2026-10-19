@@ -3,8 +3,8 @@
 Where things stand and what comes next. Overwrite this file at the end of every run.
 
 - Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation).
-- Last perf verdicts: 1a5b10e (results/20261019-1a5b10e): gate PASS, rocket 4.57x,
-  smallboom 2.41x faster than stock (both significance faster), coverage 0.988 / 0.993.
+- Last perf verdicts: f792bc5 (results/20261019-f792bc5): gate PASS, rocket 4.98x,
+  smallboom 2.20x (1a5b10e had 2.41x; within noise), coverage 0.981 / 0.992.
   Later commits up to HEAD only reformat code / notes (gate check verdicts in results/).
 - Coverage falls slowly as partitions grow (V3Localize localizes comb temps that now live in
   one partition function); the gate needs >= 0.95.
@@ -21,6 +21,7 @@ Where things stand and what comes next. Overwrite this file at the end of every 
       a pure AstCExpr (assertion control) makes a statement impure, not unknown.
     - impure `if (c)` with pure c: c computed into `__Vrtlfast_condN` by a pure statement.
     - per trigger domain: reorder = Kahn topological sort of conflict edges (RAW, WAR, WAW,
+      impure chain); DFS roots (sinks) sorted by the name of their first written variable;
       impure chain), priority = rank in a DFS post-order over RAW edges from the sinks,
       impure statements only when no pure one is ready (so they cluster).
     - contiguous partitions: GATED (pure, <= 800 nodes; once >= 50 nodes a partition is closed
