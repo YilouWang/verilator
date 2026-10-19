@@ -82,9 +82,12 @@ Where things stand and what comes next. Overwrite this file at the end of every 
   flags, statement-level or small partitions, no compares at all, inlining partitions into
   _eval_body__nba, -fno-stack-protector, producer affinity, other share thresholds and
   RELATED_MIN_SIZE values; run 4: branch around high-fanout marks, guard-aware marks, variable
-  layout in partition order, 64-bit bundle flag checks, align-functions under optimize("Os").
+  layout in partition order, 64-bit bundle flag checks, align-functions under optimize("Os"),
+  select-from-concatenation rewrite (journal wip/selconcat-neutral.patch).
 
 ## LargeBoom (proposed for the gate, see GATE_PROPOSALS.md)
+- b880403/0651d80 (run 4): lockstep 50k PASS (cov 1.0); perf 1.226x (3.97k -> 4.86k c/s) on a host that
+  is much slower for LargeBoom than in run 3 (a 30k-cycle check of the same binaries gave ~1.45x).
 - d93d1d3: lockstep 50k PASS (cov 1.0); perf 1.350x (6.3k -> 8.5k c/s), +23% from VL_ATTR_OPTSIZE.
 - fb45a89: lockstep 50k PASS (cov 1.0); perf 1.163x only (5.9k -> 6.9k c/s); stock build 29 min,
   rtl-fast C++ build 6x faster. Scratch setup: design.json from GATE_PROPOSALS.md, sources from
