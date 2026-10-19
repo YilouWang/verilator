@@ -109,6 +109,8 @@ Where things stand and what comes next. Overwrite this file at the end of every 
   select-from-concatenation rewrite (journal wip/selconcat-neutral.patch).
 
 ## LargeBoom (proposed for the gate, see GATE_PROPOSALS.md)
+- a757d13 (src = 1dd1376, run 5 host): lockstep 50k PASS (cov 1.0); perf 1.393x (6.1k -> 8.5k c/s);
+  stock make 1801 s vs 253 s (results/20261019-a757d13).
 - b880403/0651d80 (run 4): lockstep 50k PASS (cov 1.0); perf 1.226x (3.97k -> 4.86k c/s) on a host that
   is much slower for LargeBoom than in run 3 (a 30k-cycle check of the same binaries gave ~1.45x).
 - d93d1d3: lockstep 50k PASS (cov 1.0); perf 1.350x (6.3k -> 8.5k c/s), +23% from VL_ATTR_OPTSIZE.

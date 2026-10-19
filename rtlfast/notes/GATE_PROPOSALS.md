@@ -63,5 +63,8 @@ gated, so picorv32, ibex, ibex-full and VexRiscv (also added, SpinalHDL, needs -
 ~1.0x (within noise) and only check the subset checker and the untouched code paths; veer-el2
 (104k nodes) is still gated: check PASS, perf 1.43x.
 
+Update at 1dd1376 (results/20261019-a757d13): all five PASS (seed 7); veer-el2 1.69x faster
+(change detection at the input logic's assignments instead of shadow copies).
+
 Suggested gate entries: check 200000 cycles seeds [1, 2] for each (veer-el2 is the one that
 exercises gating; the small ones guard the ungated path); perf veer-el2 500000 cycles, repeat 3.
