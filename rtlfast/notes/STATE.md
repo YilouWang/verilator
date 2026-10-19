@@ -2,12 +2,13 @@
 
 Where things stand and what comes next. Overwrite this file at the end of every run.
 
-- Phase: P1 done (option + subset checker), P2 in progress (activity-driven nba evaluation).
-- Last verified HEAD: see LEDGER.md (latest line with a PASS verdict). As of run 2:
-  44c67ae, gate PASS, rocket 4.08x faster, smallboom 1.82x faster.
+- Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation).
+- Last verified HEAD with verdicts: 44c67ae (results/20261019-44c67ae): gate PASS,
+  rocket 4.08x, smallboom 1.82x faster than stock (both significance faster).
 
 ## What exists
 - `--rtl-fast` option (src/V3Options.*), docs in docs/guide/exe_verilator.rst, bin/verilator help.
+- src/V3DfgOptimizer.cpp: binToOneHot decoder tables are not created under --rtl-fast.
 - src/V3RtlFast.cpp:
   - `checkSubset` (after linking): rejects timing controls, fork, classes, DPI, `$c`;
     options: rejects `--timing`, `--threads` > 1. Tests: t_rtl_fast_unsup, t_rtl_fast_opt_bad.
@@ -18,25 +19,34 @@ Where things stand and what comes next. Overwrite this file at the end of every 
     - per trigger domain: reorder = Kahn topological sort of conflict edges (RAW, WAR, WAW,
       impure chain), priority = rank in a DFS post-order over RAW edges from the sinks,
       impure statements only when no pure one is ready (so they cluster).
-    - contiguous partitions: GATED (pure, size limit 200 nodes, env
-      VERILATOR_RTLFAST_PARTITION_SIZE for experiments), COND (impure `if (condTemp)`,
-      flag set when a cond temp changes, re-set inside the body while it holds),
-      ALWAYS (other impure statements), impure groups limited to 4000 nodes (compile time).
-    - change detection at write sites (`tmp = rhs; if (lhs != tmp) {lhs = tmp; mark}`) for
-      simple targets (var, array/bit selects with pure index), snapshot otherwise.
-  - Debug: `--debugi-V3RtlFast 3` dumps the tree.
-- rtlfast/tools/build.sh: build one benchmark with the oracle harness for profiling.
+    - contiguous partitions: GATED (pure, 200 nodes, env VERILATOR_RTLFAST_PARTITION_SIZE for
+      experiments), COND (impure `if (condTemp)`: flag set when a cond temp changes, re-set
+      inside the body while it holds), ALWAYS (other impure statements); impure groups <= 4000.
+    - branch-free change detection: change bit per output, `tmp = rhs; ch |= lhs != tmp;
+      lhs = tmp` at simple write sites (snapshot otherwise), consumer byte flags ORed with the
+      change bits at partition end. Temporaries are BLOCKTEMP so they become locals.
+    - dev profiling: VERILATOR_RTLFAST_PROFILE=<map> adds run/change counters;
+      HARNESS=rtlfast/tools/prof_harness.cpp in tools/build.sh dumps them (prof-counters.txt).
+- rtlfast/tools/build.sh: build one benchmark with the oracle harness (checks the link line).
 
 ## Measurements (see LEDGER for verdict paths)
-- rocket: stock ~157k Ir/cycle, v1 77k, v2 29k. perf 3.28x (56k -> 184k cycles/s).
-- smallboom: v2 117k Ir/cycle but 0.84x (branch mispredictions at write-site compares); branch-free change bits (791bf29): 1.82x. rocket Ir rose to 43k but time unchanged (3.26x).
-- Build: DUT C++ make is 3x faster than stock (many small functions), but numbers in verdicts
-  are polluted by ccache hits (ref make sometimes 24 s); use CCACHE_DISABLE=1 for build studies.
-- Coverage drops slightly (0.992 rocket) because V3Localize localizes comb temporaries that
-  now live inside one partition function.
+- rocket: stock ~157k Ir/cycle; v2 (branchy) 29k; branch-free 42k Ir but same time.
+  Activity: 159 partition runs/cycle (81 change something), 2623 outputs compared, 234 change.
+  ~800 statements are active in >60% of cycles (the core): inherent work.
+- smallboom: 562 runs/cycle, 11.6k outputs compared, 807 change. Large LSU/issue-queue blocks
+  with many outputs (block temps of always_ff, `unnamedblk2._GEN_*`) dominate.
+- Time split (rocket, perf srcline, rough): change bits ~28%, write temps ~11%, flag marks 5%,
+  flag checks 5%, function entry 5%, logic ~40%.
+- Negative results: per-output mark branches (mispredicts), bitmap flags, smaller partitions
+  (per-partition overhead), no compares at all, BLOCKTEMP had no measurable effect.
+- Build: DUT C++ compile ~3x faster than stock (many small functions); verdict make times are
+  polluted by ccache, measure with CCACHE_DISABLE=1.
+- The sandbox host speed changes between VM restarts (stock rocket 57k vs 44k c/s).
 
 ## Next steps
-1. Marking variants (per-output branch at partition end, any-change guard) to cut the extra Ir; disable DFG binToOneHot under --rtl-fast.
-2. Cheaper flag checks (bitmap words, skip 64 partitions at once) to allow smaller partitions.
-3. Robustness: test_regress vlt scenario with `--rtl-fast` on self-checking tests.
-4. P3: dedicated eval for designs whose clocks are top-level inputs.
+1. Clean build-time numbers (CCACHE_DISABLE=1) for ref vs dut, both designs.
+2. Smallboom: why only 1.8x. Big always_ff blocks with block temps; consider splitting
+   statements whose outputs are independent, or reducing outputs compared per run.
+3. Wide operations (concat/shift via _vl_insert_WW) are ~15% of smallboom instructions.
+4. Robustness: more test_regress families with --rtl-fast; tests for the new code paths.
+5. P3: dedicated eval for designs whose clocks are top-level inputs.
