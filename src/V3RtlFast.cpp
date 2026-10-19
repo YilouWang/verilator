@@ -806,10 +806,13 @@ class RtlFastGate final {
         }
         return stmtsp;
     }
+    // Packed values (including packed arrays and structs) compare with '!='
     static bool comparable(AstNodeDType* dtypep) {
-        const AstBasicDType* const basicp = VN_CAST(dtypep->skipRefp(), BasicDType);
-        return basicp && !basicp->isString() && !basicp->isDouble() && !basicp->isEvent()
-               && !basicp->isOpaque();
+        const AstNodeDType* const skipp = dtypep->skipRefp();
+        if (const AstBasicDType* const basicp = VN_CAST(skipp, BasicDType)) {
+            return !basicp->isOpaque();
+        }
+        return skipp->isIntegralOrPacked();
     }
     // The variable reference an assignment target writes, if the target is
     // a variable or a selection with pure indices
