@@ -191,7 +191,10 @@ class LocalizeVisitor final : public VNVisitor {
             && !nodep->varp()->isVirtIface()  // Not interface pointer
             && !nodep->varp()->constPoolEntry()  // Not a const pool entry
             && !nodep->varp()->valuep()  // Does not have an initializer
-        ) {
+            // --rtl-fast keeps user signals as members, so they stay visible
+            // under their names although partition functions would localize them
+            && !(v3Global.opt.rtlFast() && nodep->varp()->isSignal()
+                 && !nodep->varp()->isInternal())) {
             UINFO(4, "Consider for localization: " << nodep);
             m_varScopeps.push_back(nodep);
         }
