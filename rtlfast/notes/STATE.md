@@ -4,7 +4,7 @@ Where things stand and what comes next. Overwrite this file at the end of every 
 
 - Phase: P1 done (option + subset checker), P2 in progress (activity-driven nba evaluation).
 - Last verified HEAD: see LEDGER.md (latest line with a PASS verdict). As of run 2:
-  791bf29, gate PASS, rocket 3.26x faster, smallboom 1.82x faster.
+  44c67ae, gate PASS, rocket 4.08x faster, smallboom 1.82x faster.
 
 ## What exists
 - `--rtl-fast` option (src/V3Options.*), docs in docs/guide/exe_verilator.rst, bin/verilator help.

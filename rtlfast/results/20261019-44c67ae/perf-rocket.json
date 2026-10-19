@@ -1,0 +1,50 @@
+{
+ "kind": "perf",
+ "design": "rocket",
+ "cycles": 1000000,
+ "repeat": 5,
+ "cycles_per_sec": {
+  "ref": [
+   44328.9,
+   44841.8,
+   44244.2,
+   44086.3,
+   44064.8
+  ],
+  "dut": [
+   180520.0,
+   183210.8,
+   177419.5,
+   177122.1,
+   184022.8
+  ]
+ },
+ "median": {
+  "ref": 44244.2,
+  "dut": 180520.0
+ },
+ "speedup": 4.080082813114488,
+ "relative_spread": {
+  "ref": 0.017561623896465525,
+  "dut": 0.03822678927542645
+ },
+ "significance": "faster",
+ "ref_root_rev": "54730b2e3a6d91584a1df8012398823dc756480d",
+ "dut_root_rev": "44c67aea8599f3f0c34025ef62d48cb4ac484038",
+ "dut_flags": [
+  "--rtl-fast"
+ ],
+ "build_times_s": {
+  "ref_verilate_s": 6.728978872299194,
+  "dut_verilate_s": 8.32225251197815,
+  "ref_make_s": 21.253365993499756,
+  "dut_make_s": 51.603532552719116
+ },
+ "oracle_sha256": {
+  "harness.cpp": "b645b43b3eb84e95382d4773d424689b429beb3a871be58d8ac067e0fcb85ad2",
+  "gen_probes.py": "a53b70e5e455caadf8b9abbe79b5edd77d209131fdc1e7d867b190eb3b216ea0",
+  "vlhdr.py": "8055bd5026dd31d07aba52dba6dd361edf146fb39f3e99ecca6138b4f298d1b2",
+  "lockstep.py": "5eef7e6279692a1a359e586cfa76fc8a4303fa77114f8329b1386f592dbd53ad"
+ },
+ "note": "a speedup only counts together with a PASS check verdict for the same revisions"
+}
