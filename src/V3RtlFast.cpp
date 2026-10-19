@@ -264,6 +264,8 @@ public:
 class RtlFastGate final {
     // Statements are merged into one gated partition up to this size (in AST nodes)
     static constexpr size_t PARTITION_SIZE = 200;
+    // Limit of consumer marks generated for one variable (see partition())
+    static constexpr size_t MAX_MARKS_PER_VARIABLE = 1 << 16;
     // A gated partition of at least this size only takes related statements
     static constexpr size_t RELATED_MIN_SIZE = 50;
     // Size limit for groups of impure statements; these are mostly skipped as a
@@ -332,6 +334,7 @@ class RtlFastGate final {
     size_t m_nShadows = 0;
     size_t m_nWriteSites = 0;
     size_t m_nSnapshots = 0;
+    size_t m_nUngated = 0;  // Pure partitions that always run
 
     VarInfo& varInfo(AstVarScope* vscp) {
         if (!vscp->user1()) {
@@ -704,6 +707,25 @@ class RtlFastGate final {
                 }
             }
         }
+        // Marking every reader of a variable at every writer is quadratic when
+        // a variable has many writers and many readers (e.g. an array written
+        // element by element); the readers of such a variable always run instead
+        std::unordered_map<const AstVarScope*, size_t> nReaders;
+        for (const Part& part : m_parts) {
+            if (part.m_kind != Kind::GATED) continue;
+            for (const AstVarScope* const vscp : part.m_ins) ++nReaders[vscp];
+        }
+        for (Part& part : m_parts) {
+            if (part.m_kind != Kind::GATED) continue;
+            for (AstVarScope* const vscp : part.m_ins) {
+                const size_t nWriters = varInfo(vscp).m_writerParts.size();
+                if (nWriters * nReaders[vscp] > MAX_MARKS_PER_VARIABLE) {
+                    part.m_kind = Kind::ALWAYS;
+                    ++m_nUngated;
+                    break;
+                }
+            }
+        }
         // Flags and consumers
         for (Part& part : m_parts) {
             if (part.m_kind == Kind::ALWAYS) continue;
@@ -1052,6 +1074,7 @@ public:
         V3Stats::addStat("RtlFast, partitions gated", nParts[Kind::GATED]);
         V3Stats::addStat("RtlFast, partitions conditional", nParts[Kind::COND]);
         V3Stats::addStat("RtlFast, partitions always run", nParts[Kind::ALWAYS]);
+        V3Stats::addStat("RtlFast, partitions always run (too many marks)", m_nUngated);
         V3Stats::addStat("RtlFast, partition outputs compared", nOuts);
         V3Stats::addStat("RtlFast, outputs compared at write sites", m_nWriteSites);
         V3Stats::addStat("RtlFast, outputs compared by snapshot", m_nSnapshots);
