@@ -25,7 +25,7 @@
 - 代码组成（smallboom，-Os，一个文件的反汇编按源码行归类）：变化位更新约 18%，标记和标志约 13%，其余是逻辑和存储。分区代码共约 1.7 MB，超过每核 1 MB 的 L2。
 - LargeBoom：4005 个分区，每周期运行 1463 个（37%），每周期 33.3 万个节点的工作量里 18.8 万发生在没有输出变化的运行里；最大的单条语句（LSU）有 13143 个节点、963 个输出。
 - 构建时间：不用 ccache 时，oracle 的 harness.cpp 编译本身最长（rocket 47 s，smallboom 155 s，因为有 2.4 万个探针），smallboom DUT 的 make 墙钟时间就等于这个文件的编译时间，所以继续缩短生成代码的编译时间在门限的 make 时间里体现不出来。
-- test_regress：821 个 vlt 测试加 --rtl-fast（含捆绑），479 个通过，没有结果错误；失败都是预期的拒绝、编译日志金样、缺少 verilator_bin_dbg，以及原版也失败的 t_order_clkinst（VCD）。
+- test_regress（d93d1d3，含捆绑、模块临时变量和 optSize）：先在 821 个 vlt 测试上，479 个通过；又在另外 2265 个测试上，829 个通过。没有结果错误。失败都是预期的拒绝、编译日志金样、缺少 verilator_bin_dbg、统计计数检查（BinToOneHot、MergeCond、Subst）、t_prof 的函数名和 cmake；14 个 VCD 金样失败在原版上同样失败，而且它们生成的 VCD 文件与原版完全相同。
 
 ### 负面结果
 - 语句裂变：把 200 节点以上的 if 语句按分支拆成单独的带守卫语句，再加上按守卫的确定写分析：smallboom 从约 3.0 万掉到约 2.2 万周期每秒（每周期分区运行从 725 增加到 870，静态工作量不变），rocket 不变。只拆 2000 节点以上的语句：smallboom 和 LargeBoom 都没有收益。补丁存于 journal 的 wip/。

@@ -43,8 +43,9 @@ Where things stand and what comes next. Overwrite this file at the end of every 
       at -Os, so this is specific to the gated code).
     - dev knobs (not for users): VERILATOR_RTLFAST_BUNDLE_MEMBER / _BUNDLE, VERILATOR_RTLFAST_PARTITION_SIZE, VERILATOR_RTLFAST_PROFILE=<map>
       (run/change counters; dump with HARNESS=rtlfast/tools/prof_harness.cpp in tools/build.sh).
-- Tests: t_rtl_fast_unsup, t_rtl_fast_opt_bad, t_rtl_fast_gate (output vs stock golden),
-  t_rtl_fast_many_marks. test_regress vlt with --rtl-fast on ~2200 tests: no wrong results.
+- Tests: t_rtl_fast_unsup, t_rtl_fast_opt_bad, t_rtl_fast_gate and t_rtl_fast_bundle (output vs
+  stock golden), t_rtl_fast_many_marks. test_regress vlt with --rtl-fast at d93d1d3 on ~3100 tests
+  (lists: run-3 LEDGER): no wrong results; VCD-golden failures also fail on stock, VCDs identical.
 - rtlfast/tools/prof_analyze.py <map> <prof-counters.txt> [n] [m]: partition activity table and the
   inputs that trigger runs without output change (needs a VERILATOR_RTLFAST_PROFILE build).
 - rtlfast/tools/build.sh: build one benchmark with the oracle harness (run from any cwd; checks
