@@ -4,8 +4,10 @@ Where things stand and what comes next. Overwrite this file at the end of every 
 
 - Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation), P5 started
   (extra designs with random inputs, rtlfast/extra/setup.sh).
-- HEAD src = 06d3124 (run 5): 0651d80 plus DPI exports allowed under --rtl-fast. Gate check PASS
-  (results/20261019-06d3124). No code generation change since b880403.
+- HEAD src = 694f938 (run 5): 0651d80 plus DPI exports allowed (06d3124) plus no gating for nba
+  regions below 50000 AST nodes (694f938). Gate check PASS (results/20261019-694f938). Code
+  generation for the gate designs unchanged since b880403; current perf on the run-5 host
+  (results/20261019-6200f62): rocket 5.008x, smallboom 3.103x.
 - Last perf verdicts: b880403 (results/20261019-b880403): rocket 4.46x, smallboom 3.35x; end of run 4
   re-run (results/20261019-6364dfb): rocket 4.35x, smallboom 2.62x; d93d1d3 (run 3): 5.41x / 2.97x.
   Run 5 did not produce a faster revision (all experiments neutral or negative, see LEDGER).
@@ -14,10 +16,11 @@ Where things stand and what comes next. Overwrite this file at the end of every 
   model. Ratios are only comparable within one verdict or one interleaved A/B; record `lscpu`.
 - Coverage: under --rtl-fast V3Localize keeps user signals (not internal) as members, so
   coverage no longer depends on partition shapes (47e82bb).
-- Known weakness (run 5): small designs with very high activity get SLOWER: ibex with random inputs
+- Known weakness (run 5, mitigated by 694f938 for small designs): designs with very high activity get SLOWER: ibex with random inputs
   0.64x to 0.70x (75% of nba nodes active, nba region ~1.5 times per cycle, 528 variables written by
   replicated ico/act logic compared with shadows at every nba region start = 32% of the time).
-  picorv32 1.2x and VeeR EL2 1.39x faster with random inputs.
+  picorv32 1.2x and VeeR EL2 1.39x faster with random inputs. Since 694f938 regions below 50k nodes
+  are not gated (ibex, ibex-full, VexRiscv, picorv32 ~1.0x; VeeR 104k nodes still gated, 1.43x).
 
 ## What exists
 - `--rtl-fast` option (src/V3Options.*), docs in docs/guide/exe_verilator.rst, bin/verilator help.
@@ -55,11 +58,14 @@ Where things stand and what comes next. Overwrite this file at the end of every 
     - partition functions carry AstCFunc::optSize -> VL_ATTR_OPTSIZE (GCC optimize("Os"), clang
       minsize): the gated model is instruction-fetch bound (smallboom +12-15%; stock gets slower
       at -Os, so this is specific to the gated code).
+    - nba regions below MIN_NODES = 50000 AST nodes are not gated (694f938; env
+      VERILATOR_RTLFAST_MIN_NODES, gating tests set it to 0).
     - DPI exports are allowed (06d3124): variables they write are outside writes (shadow compare);
       DPI imports, timing, fork, classes and $c are rejected.
     - dev knobs (not for users): VERILATOR_RTLFAST_BUNDLE_MEMBER / _BUNDLE, VERILATOR_RTLFAST_PARTITION_SIZE, VERILATOR_RTLFAST_PROFILE=<map>
       (run/change counters; dump with HARNESS=rtlfast/tools/prof_harness.cpp in tools/build.sh).
-- Tests: t_rtl_fast_unsup, t_rtl_fast_opt_bad, t_rtl_fast_gate, t_rtl_fast_bundle, t_rtl_fast_dpi_export and
+- Tests: t_rtl_fast_unsup, t_rtl_fast_opt_bad, t_rtl_fast_gate, t_rtl_fast_bundle, t_rtl_fast_dpi_export,
+  t_rtl_fast_small and
   t_rtl_fast_packed (output vs stock golden; packed uses VERILATOR_RTLFAST_PARTITION_SIZE=1 and
   checks "outputs not compared 0"), t_rtl_fast_many_marks. test_regress vlt with --rtl-fast at d93d1d3 on ~3100 tests
   (lists: run-3 LEDGER): no wrong results; VCD-golden failures also fail on stock, VCDs identical.
