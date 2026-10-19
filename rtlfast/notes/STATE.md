@@ -3,8 +3,8 @@
 Where things stand and what comes next. Overwrite this file at the end of every run.
 
 - Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation).
-- Last verified HEAD with verdicts: 44c67ae (results/20261019-44c67ae): gate PASS,
-  rocket 4.08x, smallboom 1.82x faster than stock (both significance faster).
+- Last verified HEAD with verdicts: 109d691 (results/20261019-109d691): gate PASS,
+  rocket 4.60x, smallboom 2.16x faster than stock (both significance faster).
 
 ## What exists
 - `--rtl-fast` option (src/V3Options.*), docs in docs/guide/exe_verilator.rst, bin/verilator help.
