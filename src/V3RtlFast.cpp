@@ -990,6 +990,9 @@ class RtlFastGate final {
         funcp->isStatic(false);
         funcp->isLoose(true);
         funcp->slow(false);
+        // Each evaluation runs a different subset of many partition functions,
+        // so instruction fetch dominates: smaller code is faster
+        funcp->optSize(true);
         scopep->addBlocksp(funcp);
         return funcp;
     }

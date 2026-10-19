@@ -562,6 +562,7 @@ class AstCFunc final : public AstNode {
     bool m_unlikely : 1;  // Unlikely to get called (though still optimize unlike slow())
     bool m_noLife : 1;  // Disable V3Life on this function - has multiple calls, and reads Syms
                         // state
+    bool m_optSize : 1;  // Optimize for code size (instruction fetch bound code)
     bool m_isCovergroupSample : 1;  // Automatic covergroup sample() function
     bool m_voidSelf : 1;  // Loose method taking its 'self' pointer as 'void* vlVoidSelf'
     int m_cost;  // Function call cost
@@ -595,6 +596,7 @@ public:
         m_recursive = false;
         m_unlikely = false;
         m_noLife = false;
+        m_optSize = false;
         m_isCovergroupSample = false;
         m_voidSelf = false;
         m_cost = v3Global.opt.instrCountDpi();  // As proxy for unknown general DPI cost
@@ -678,6 +680,8 @@ public:
     bool isUnlikely() const override { return m_unlikely; }  // Note virtual override
     void noLife(bool flag) { m_noLife = flag; }
     bool noLife() const { return m_noLife; }
+    void optSize(bool flag) { m_optSize = flag; }
+    bool optSize() const { return m_optSize; }
     bool isCovergroupSample() const { return m_isCovergroupSample; }
     void isCovergroupSample(bool flag) { m_isCovergroupSample = flag; }
     bool voidSelf() const { return m_voidSelf; }

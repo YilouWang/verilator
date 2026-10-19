@@ -140,6 +140,7 @@ void EmitCBaseVisitorConst::emitCDefaultConstructor(const AstNodeModule* const m
 void EmitCBaseVisitorConst::emitCFuncHeader(const AstCFunc* funcp, const AstNodeModule* modp,
                                             bool withScope) {
     if (funcp->slow()) putns(funcp, "VL_ATTR_COLD ");
+    if (funcp->optSize()) putns(funcp, "VL_ATTR_OPTSIZE ");
     if (funcp->dpiCDeclOverride()) {
         putns(funcp, funcp->dpiCDecl() + ";\n");
         return;
