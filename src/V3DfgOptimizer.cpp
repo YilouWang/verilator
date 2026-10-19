@@ -139,8 +139,12 @@ class DataflowOptimize final {
             endOfStage("inlineVars", dfg, comps);
             for (auto& cp : comps) V3DfgPasses::cse(*cp, m_ctx.m_cseContext0);
             endOfStage("cse0", dfg, comps);
-            for (auto& cp : comps) V3DfgPasses::binToOneHot(*cp, m_ctx.m_binToOneHotContext);
-            endOfStage("binToOneHot", dfg, comps);
+            // The decoder tables are rewritten on every evaluation, which would
+            // keep all their readers active under --rtl-fast
+            if (!v3Global.opt.rtlFast()) {
+                for (auto& cp : comps) V3DfgPasses::binToOneHot(*cp, m_ctx.m_binToOneHotContext);
+                endOfStage("binToOneHot", dfg, comps);
+            }
             for (auto& cp : comps) V3DfgPasses::peephole(*cp, m_ctx.m_peepholeContext);
             endOfStage("peephole", dfg, comps);
 
