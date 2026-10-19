@@ -349,6 +349,7 @@ class RtlFastGate final {
     size_t m_nShadows = 0;
     size_t m_nWriteSites = 0;
     size_t m_nSnapshots = 0;
+    size_t m_nUncompared = 0;  // Outputs assumed changed whenever their writer runs
     size_t m_nChangeBits = 0;
     size_t m_nUngated = 0;  // Pure partitions that always run
 
@@ -915,6 +916,7 @@ class RtlFastGate final {
             if (!comparable(vscp->dtypep()) && !sites.count(vscp)) {
                 // Conservatively changed whenever the writer runs
                 postp = append(postp, markConsumers(flp, info));
+                ++m_nUncompared;
                 continue;
             }
             // A partition need not rerun after changing a variable it does not read
@@ -1223,6 +1225,7 @@ public:
         V3Stats::addStat("RtlFast, partition outputs compared", nOuts);
         V3Stats::addStat("RtlFast, outputs compared at write sites", m_nWriteSites);
         V3Stats::addStat("RtlFast, outputs compared by snapshot", m_nSnapshots);
+        V3Stats::addStat("RtlFast, outputs not compared", m_nUncompared);
         V3Stats::addStat("RtlFast, change bits", m_nChangeBits);
         V3Stats::addStat("RtlFast, consumer marks", nMarks);
         V3Stats::addStat("RtlFast, outside variables compared", m_nShadows);
