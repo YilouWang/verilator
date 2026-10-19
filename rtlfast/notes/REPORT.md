@@ -24,7 +24,7 @@
 - 按分区顺序排列变量（数据局部性）：在噪声之内。wip/varorder-neutral.patch。
 - "从等宽部分拼接中按 W*i 取 W 位"（CIRCT 的 `wire [K-1:0][W-1:0] g = {...}; g[i]`，例如 rocket 的 TLB 扇区数据，每次都先拼出宽临时变量）改写成 `i == 0 ? p0 : ...`：rocket 改写 36 处，smallboom 75 处，rocket 代码少 6.5 KB，输出相同；A/B rocket 加 2.9%，smallboom 减 2.9%，在噪声之内。补丁和测试在 wip/selconcat-neutral.patch。
 - _eval_body__nba 里用 64 位读检查捆绑成员标志（修改生成的 rocket C++ 做原型）：没有收益。_eval_body__nba 在剖析里的 10% 主要是 GCC 内联进去的分区函数，不是标志检查。
-- 600 节点以上的分区用 -O2 而不是 -Os：代码大 15% 到 20%，速度不变。
+- 600 节点以上的分区用 -O2 而不是 -Os：代码大 15% 到 20%，速度不变。在本次的大缓存主机上全部分区用 -O2：比 -Os 慢约 5%（53.5k 对 56.1k），-Os 继续保留。
 - GCC 的 optimize("Os", "align-functions=32")：被忽略，代码完全相同。
 - 测量噪声：本次单次运行差别达到正负 15%，固定核心也一样；5% 以下的改进测不出来。
 
