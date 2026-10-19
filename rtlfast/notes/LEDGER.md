@@ -40,3 +40,4 @@ Format: `UTC date | short sha | what was tried | check verdict | perf (speedup /
 2026-10-19 | dev | max partition size 400 / 800 / 2000 with the affinity cut, 3 rounds | n/a | rocket ~207k / ~221k / ~220k; smallboom 29.2k / 29.4k / 29.2k; make (-j4) rocket 49.5 s at 800, 56.7 s at 2000 | 800 adopted (1a5b10e)
 2026-10-19 | 1a5b10e | partition size limit 800 | PASS rocket 300k (cov 0.988) + smallboom 150k (results/20261019-1a5b10e) | rocket 4.565x (44.0k -> 200.7k c/s), smallboom 2.407x (13.0k -> 31.3k), both significance faster | smallboom +12% over 109d691, rocket unchanged
 2026-10-19 | dev | RELATED_MIN_SIZE 25 / 50 / 100 at partition size 800, 3 rounds | n/a | rocket ~212k / ~209k / ~189k; smallboom 27.7k / 28.0k / 26.4k | keep 50
+2026-10-19 | 49222f3 | clang-format of V3RtlFast.cpp (no functional change) | PASS rocket 300k (cov 0.988) + smallboom 150k (results/20261019-49222f3) | n/a | formatting only
