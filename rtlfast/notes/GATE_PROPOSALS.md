@@ -58,5 +58,10 @@ cycles, veer-el2 100k). Perf: picorv32 1.20x, veer-el2 1.39x faster, ibex-full 0
 ~1.5 times per cycle). A perf entry for ibex would guard against making high-activity designs
 even slower.
 
-Suggested gate entries: check 200000 cycles seeds [1, 2] for each; perf ibex-full 2000000
-cycles and veer-el2 500000 cycles, repeat 3.
+Update at 694f938 (results/20261019-7b18a74): nba regions below 50000 AST nodes are no longer
+gated, so picorv32, ibex, ibex-full and VexRiscv (also added, SpinalHDL, needs --flatten) run at
+~1.0x (within noise) and only check the subset checker and the untouched code paths; veer-el2
+(104k nodes) is still gated: check PASS, perf 1.43x.
+
+Suggested gate entries: check 200000 cycles seeds [1, 2] for each (veer-el2 is the one that
+exercises gating; the small ones guard the ungated path); perf veer-el2 500000 cycles, repeat 3.
