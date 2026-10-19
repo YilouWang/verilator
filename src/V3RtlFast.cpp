@@ -31,6 +31,8 @@
 //     variables it may read before writing them.
 //   - A variable written by more than one writer (another partition, or code
 //     outside the nba region) is also an input of every partition writing it.
+//     Its own changes of such a variable do not make a partition dirty: running
+//     it again would write the same value.
 //   - Every value change of an input is detected: partitions compare the
 //     written value with the old one at each assignment (or compare their
 //     outputs before and after running), and variables written outside the
@@ -298,6 +300,8 @@ class RtlFastGate final {
         std::vector<size_t> m_stmts;  // Indices into m_stmts
         std::vector<AstVarScope*> m_ins;  // Inputs
         std::vector<AstVarScope*> m_outs;  // Written variables
+        // Inputs only because another writer may change them (not read before written)
+        std::set<const AstVarScope*> m_writerIns;
         size_t m_size = 0;  // Node count
         int m_flag = -1;  // Dirty flag index if not ALWAYS
     };
@@ -334,6 +338,7 @@ class RtlFastGate final {
     size_t m_nShadows = 0;
     size_t m_nWriteSites = 0;
     size_t m_nSnapshots = 0;
+    size_t m_nChangeBits = 0;
     size_t m_nUngated = 0;  // Pure partitions that always run
 
     VarInfo& varInfo(AstVarScope* vscp) {
@@ -715,6 +720,7 @@ class RtlFastGate final {
                 const VarInfo& info = varInfo(vscp);
                 if ((info.m_outside || info.m_writerParts.size() > 1) && ins.insert(vscp).second) {
                     part.m_ins.push_back(vscp);
+                    part.m_writerIns.insert(vscp);
                 }
             }
         }
@@ -863,6 +869,9 @@ class RtlFastGate final {
         AstNode* postp = nullptr;
         std::map<int, AstNodeExpr*> flagChanges;  // Consumer flag -> OR of change bits
         std::vector<std::pair<int, AstVarScope*>> profChanges;
+        // Outputs with the same consumers share one change bit (unless profiling,
+        // which counts the changes of each output)
+        std::map<std::vector<int>, AstVarScope*> groupChanges;
         for (AstVarScope* const vscp : part.m_outs) {
             const VarInfo& info = varInfo(vscp);
             if (info.m_consumerFlags.empty()) continue;
@@ -871,10 +880,21 @@ class RtlFastGate final {
                 postp = append(postp, markConsumers(flp, info));
                 continue;
             }
-            AstVarScope* const changep = newLocalTemp("ch", m_netlistp->findBitDType());
-            prep = AstNode::addNext(prep,
-                                    new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
-                                                  new AstConst{flp, AstConst::BitFalse{}}});
+            // A partition need not rerun after changing a variable it does not read
+            std::vector<int> consumers;
+            for (const int flag : info.m_consumerFlags) {
+                if (flag != part.m_flag || !part.m_writerIns.count(vscp)) consumers.push_back(flag);
+            }
+            if (consumers.empty()) continue;
+            AstVarScope*& changep = groupChanges[consumers];
+            const bool newGroup = !changep || m_profRunsp;
+            if (newGroup) {
+                changep = newLocalTemp("ch", m_netlistp->findBitDType());
+                ++m_nChangeBits;
+                prep = AstNode::addNext(
+                    prep, new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
+                                        new AstConst{flp, AstConst::BitFalse{}}});
+            }
             const auto it = sites.find(vscp);
             if (it != sites.end()) {
                 for (AstNodeAssign* const assignp : it->second) {
@@ -886,9 +906,11 @@ class RtlFastGate final {
                     prep, new AstAssign{flp, new AstVarRef{flp, oldp, VAccess::WRITE},
                                         new AstVarRef{flp, vscp, VAccess::READ}});
                 postp = AstNode::addNext(
-                    postp, new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
-                                         new AstNeq{flp, new AstVarRef{flp, vscp, VAccess::READ},
-                                                    new AstVarRef{flp, oldp, VAccess::READ}}});
+                    postp,
+                    new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
+                                  new AstOr{flp, new AstVarRef{flp, changep, VAccess::READ},
+                                            new AstNeq{flp, new AstVarRef{flp, vscp, VAccess::READ},
+                                                       new AstVarRef{flp, oldp, VAccess::READ}}}});
                 ++m_nSnapshots;
             }
             if (m_profRunsp) {
@@ -898,7 +920,8 @@ class RtlFastGate final {
                                     + vscp->prettyName());
                 profChanges.emplace_back(m_profOuts++, changep);
             }
-            for (const int flag : info.m_consumerFlags) {
+            if (!newGroup) continue;
+            for (const int flag : consumers) {
                 AstNodeExpr*& exprp = flagChanges[flag];
                 AstNodeExpr* const bitp = new AstVarRef{flp, changep, VAccess::READ};
                 exprp = exprp ? new AstOr{flp, exprp, bitp} : bitp;
@@ -1096,6 +1119,7 @@ public:
         V3Stats::addStat("RtlFast, partition outputs compared", nOuts);
         V3Stats::addStat("RtlFast, outputs compared at write sites", m_nWriteSites);
         V3Stats::addStat("RtlFast, outputs compared by snapshot", m_nSnapshots);
+        V3Stats::addStat("RtlFast, change bits", m_nChangeBits);
         V3Stats::addStat("RtlFast, consumer marks", nMarks);
         V3Stats::addStat("RtlFast, outside variables compared", m_nShadows);
     }
