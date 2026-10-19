@@ -14,6 +14,7 @@ fetch() {  # name url sha
 fetch picorv32 https://github.com/YosysHQ/picorv32.git ef203c2b0a3fb793280f5114941416c425c5b461
 fetch ibex https://github.com/lowRISC/ibex.git 1b29dae8866e6c0f0a3cd9dead53a77b4f45e357
 fetch veer https://github.com/chipsalliance/Cores-VeeR-EL2.git 0169d669eedec31f723dde006125e22c4bf83a95
+fetch vexriscv https://github.com/litex-hub/pythondata-cpu-vexriscv.git 642ecfed1c84460555d6d803d660cc60cfc1ecb6
 (cd "$D/src/veer" && RV_ROOT="$PWD" perl configs/veer.config -target=default -snapshot=default > /dev/null)
 python3 - "$D" <<'PY'
 import json, os, sys
@@ -51,5 +52,11 @@ write("veer-el2", dict(top="veer_wrapper", clock="clk", reset="rst_l", reset_act
       verilator_flags=["+define+RV_OPENSOURCE", f"+incdir+{V}/testbench",
                        f"+incdir+{V}/snapshots/default", f"+incdir+{V}/design/include",
                        f"+incdir+{V}/design/lib"]))
+# SpinalHDL marks some signals public, which keeps the core a separate class:
+# --flatten puts its state into the root class, where the oracle probes it
+for v in ("Linux", "Full"):
+    write("vexriscv-" + v.lower(), dict(top="VexRiscv", clock="clk", reset="reset", reset_active=1,
+          sources=[f"{S}/vexriscv/pythondata_cpu_vexriscv/verilog/VexRiscv_{v}.v"],
+          verilator_flags=["--flatten"]))
 print("rtlfast: extra designs ready in", D)
 PY
