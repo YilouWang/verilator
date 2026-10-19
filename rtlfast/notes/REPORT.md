@@ -5,7 +5,7 @@
 ## 第 2 次运行（2026-10-18 22:10 UTC 起）
 
 ### 结论
-- 当前 HEAD 门限全部 PASS。最新的性能 verdict（109d691，results/20261019-109d691）：rocket 4.601 倍（42.6k 到 196.2k 周期每秒），smallboom 2.157 倍（13.5k 到 29.1k），均为 significance faster。
+- 当前 HEAD 门限全部 PASS。最新的性能 verdict（1a5b10e，results/20261019-1a5b10e）：rocket 4.565 倍（44.0k 到 200.7k 周期每秒），smallboom 2.407 倍（13.0k 到 31.3k），均为 significance faster。覆盖率 rocket 0.988，smallboom 0.993。
 - C++ 编译更快（CCACHE_DISABLE=1，-j4）：rocket 原版 verilate 7.1 s 加 make 106.7 s，--rtl-fast 8.2 s 加 46.8 s（总计快 2.07 倍）；smallboom 原版 16.4 s 加 202.5 s，--rtl-fast 19.8 s 加 109.2 s（快 1.70 倍）。
 
 ### 做了什么（按提交顺序）
@@ -21,6 +21,7 @@
 - 44c67ae：分区临时变量改为块临时变量；开发用活动计数器（VERILATOR_RTLFAST_PROFILE，配合 rtlfast/tools/prof_harness.cpp）。rocket 4.080 倍，smallboom 1.823 倍（results/20261019-44c67ae）。虚拟机重启后宿主机变慢（原版 rocket 从 57k 降到 44k 周期每秒），只能在同一个 verdict 内比较倍数。
 - 109d691：分区亲和切分。分区达到 50 个节点后，若下一条语句与之无关（不读分区写的变量，也不共享一半以上输入），就开新分区。数字见结论。
 - 2f8a8be：限制单个变量产生的消费者标记数。一个变量的标记数等于写者分区数乘读者分区数；t_flag_output_groups_max_size（N=20000，数组被每条语句逐元素读写）在 --rtl-fast 下用掉 9 到 16 GB 内存。现在超过 65536 时读者分区不再门控、总是执行，该测试 7.5 s、223 MB。新增测试 t_rtl_fast_gate（与原版输出金样比较）和 t_rtl_fast_many_marks。门限 PASS（results/20261019-2f8a8be）；该限制在两个门限设计上不触发，生成代码不变，所以没有新的性能运行。
+- 1a5b10e：分区大小上限从 200 提到 800。有了亲和切分以后，更大的分区减少每个分区的固定开销而不会把无关逻辑放在一起（扫描 120/200/400/800/2000：smallboom 26.1k/26.7k/29.3k/29.4k/29.2k，rocket 约 197k/205k/214k/221k/220k 周期每秒）。门限 PASS，数字见结论。
 - 工具：rtlfast/tools/build.sh（用 oracle 的 harness 单独构建基准，检查链接行），rtlfast/tools/prof_harness.cpp。
 
 ### 测量
@@ -36,6 +37,7 @@
 - 位图脏标志（64 位字，整字跳过）：rocket 持平或更慢，smallboom 从 4.0 万掉到 3.65 万。每个分区的固定开销（调用、变化位初始化、标记）占主导，更细的分区不划算。
 - 完全不比较输出、总是标记消费者：rocket 只有 3 万周期每秒。
 - 块临时变量局部化、按上游分区的亲和、25% 或 75% 的输入共享阈值：都在噪声范围内或更差。
+- 把分区函数内联进 _eval_body__nba（--inline-cfuncs 300）：更慢。关闭 -fstack-protector 和 -fstack-clash-protection：没有效果。
 - 一次“分区大小 50 达到 37 万周期每秒”的结果是无效的：make 通过相对 VPATH 链接了另一个构建的 harness.o（模型布局不同，Linux 镜像预加载到错误位置）。已修复 tools/build.sh 并加了检查。
 
 ### 失败与教训
@@ -45,5 +47,5 @@
 ### 下一步
 - smallboom 只有约 2 倍：大的 LSU 和发射队列语句块输出很多，大部分不变；需要减少每次运行比较的输出数，或拆分这类语句。
 - 宽位运算（拼接、移位经 _vl_insert_WW）约占 smallboom 指令的 15%。
-- 更多 test_regress 测试族加 --rtl-fast。
+- 已在另外 1018 个 test_regress 测试上加 --rtl-fast 运行，仍没有发现结果错误（共约 2200 个测试）。
 - P3：时钟都是顶层输入时的专用求值函数。

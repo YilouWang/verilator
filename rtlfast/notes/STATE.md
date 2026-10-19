@@ -3,10 +3,10 @@
 Where things stand and what comes next. Overwrite this file at the end of every run.
 
 - Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation).
-- Last perf verdicts: 109d691 (results/20261019-109d691): gate PASS, rocket 4.60x,
-  smallboom 2.16x faster than stock (both significance faster). HEAD 2f8a8be adds a bound on
-  consumer marks (gate check PASS, results/20261019-2f8a8be; generated code for the gate
-  designs unchanged, so no new perf run).
+- Last perf verdicts: 1a5b10e (results/20261019-1a5b10e): gate PASS, rocket 4.57x,
+  smallboom 2.41x faster than stock (both significance faster), coverage 0.988 / 0.993.
+  Coverage falls slowly as partitions grow (V3Localize localizes comb temps that now live in
+  one partition function); keep an eye on it (gate needs >= 0.95).
 
 ## What exists
 - `--rtl-fast` option (src/V3Options.*), docs in docs/guide/exe_verilator.rst, bin/verilator help.
@@ -22,8 +22,8 @@ Where things stand and what comes next. Overwrite this file at the end of every 
       impure chain), priority = rank in a DFS post-order over RAW edges from the sinks,
       impure statements only when no pure one is ready (so they cluster).
     - contiguous partitions, closed early (once >= 50 nodes) when the next statement is
-      unrelated (no RAW from the partition, shares < half its inputs): GATED (pure, 200 nodes, env VERILATOR_RTLFAST_PARTITION_SIZE for
-      experiments), COND (impure `if (condTemp)`: flag set when a cond temp changes, re-set
+      unrelated (no RAW from the partition, shares < half its inputs): GATED (pure, at most 800 nodes since 1a5b10e, env
+      VERILATOR_RTLFAST_PARTITION_SIZE for experiments), COND (impure `if (condTemp)`: flag set when a cond temp changes, re-set
       inside the body while it holds), ALWAYS (other impure statements); impure groups <= 4000.
     - branch-free change detection: change bit per output, `tmp = rhs; ch |= lhs != tmp;
       lhs = tmp` at simple write sites (snapshot otherwise), consumer byte flags ORed with the
