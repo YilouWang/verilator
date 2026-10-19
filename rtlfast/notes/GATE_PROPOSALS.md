@@ -37,3 +37,26 @@ Update at d93d1d3 (results/20261019-d93d1d3/extra-*-largeboom*.json): check 50k 
 perf 1.350x (6.3k -> 8.5k c/s).
 Suggested gate entry: check 50000 cycles seed 1, perf 100000 cycles repeat 3 (a stock build alone
 takes ~30 min of the run budget).
+
+## Random-input designs: picorv32, ibex, ibex-full, veer-el2 (proposed 2026-10-19, run 5)
+
+Why: the gate has only two Chisel/CIRCT-generated designs with one workload (Linux boot). These
+hand-written designs cover SystemVerilog packages, packed structs, enums, interfaces (VeeR
+el2_mem_if), generate, latch-based clock gating (ibex prim_clock_gating, VeeR rvclkhdr) and a
+very different activity regime (all inputs random every cycle). They are small: a check of
+200k cycles takes 1 to 3 minutes per design including both builds.
+
+Setup: `rtlfast/extra/setup.sh <dir>` clones the pinned commits (picorv32 ef203c2b, ibex
+1b29dae8, Cores-VeeR-EL2 0169d669), runs the VeeR config script and writes
+`<dir>/<name>/design.json` (absolute paths; ibex needs `+define+SYNTHESIS`, otherwise its
+simulation-only DPI exports are rejected by --rtl-fast).
+
+Evidence at 0651d80 sources (results/20261019-3fb91a5/extra-*.json): check PASS with coverage
+1.0 for picorv32 seeds 1-3, ibex seeds 1-2, ibex-full seeds 1-3, veer-el2 seeds 1-2 (200k
+cycles, veer-el2 100k). Perf: picorv32 1.20x, veer-el2 1.39x faster, ibex-full 0.70x SLOWER
+(about 75% of the nba nodes are active every cycle with random inputs, and the nba region runs
+~1.5 times per cycle). A perf entry for ibex would guard against making high-activity designs
+even slower.
+
+Suggested gate entries: check 200000 cycles seeds [1, 2] for each; perf ibex-full 2000000
+cycles and veer-el2 500000 cycles, repeat 3.
