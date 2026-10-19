@@ -114,18 +114,27 @@ Where things stand and what comes next. Overwrite this file at the end of every 
   1.7x that of smallboom (cache pressure). Fission of >= 2000-node statements: no gain.
 
 ## Next steps
-1. Run 5 closed most cheap performance directions (all in LEDGER with numbers): base pointers
-   (code -7 to -11%, time +0 to +3%), software prefetch of partition code (worse), affinity rule
-   for new inputs, high-fanout isolation, guards on LargeBoom (all worse or neutral). Without
-   hardware counters the remaining bottleneck of the gated model cannot be pinned down; the
-   evidence: per partition run cost, not code size or fetch latency, dominates.
-2. Structural options left: (a) sharing code between repeated instances (needs per-instance
-   layout, parametrised constants, aligned partitioning; LargeBoom exact-duplicate potential only
-   12% of executed text), (b) a runtime fallback to ungated evaluation for very active phases
-   (needs a second code copy, hurts build time), (c) write-site change detection in ico/act code to
-   replace shadow compares (helps ibex-like designs with many replicated comb variables).
-3. Ask Yilou about the gate proposals (LargeBoom; random-input picorv32/ibex/VeeR).
-4. Do not branch on change bits in hot code (three negative results).
+1. Run 5 closed most cheap performance directions for the gated code (all in LEDGER with numbers):
+   base pointers (code -7 to -11%, time +0 to +3%; journal wip/basepointers-neutral.patch), software
+   prefetch of partition code (worse), affinity rule for new inputs, high-fanout isolation, guards
+   on LargeBoom (all neutral or worse). Without hardware counters the bottleneck of the gated model
+   cannot be pinned down; the evidence says per-run work (compares ~20%, marks ~14% of executed
+   instructions on LargeBoom), not code size or fetch latency.
+2. Designs driven by a testbench (VeeR: 1318, ibex-full: 528 variables written by ico/act logic)
+   pay for shadow compares at every nba region start (VeeR 22% of time in _eval_body__nba). Option:
+   detect changes at the write sites in the ico/act functions (compare + marks, no shadow copy),
+   keeping shadows only for variables with non-simple writes; expected gain is modest (the copy and
+   one load per variable; branch-free shadow marks were not faster).
+3. Structural options left for large designs: (a) sharing code between repeated instances (needs
+   per-instance layout, parametrised constants, aligned partitioning; LargeBoom exact-duplicate
+   potential only 12% of executed text), (b) a second, ungated code copy chosen at run time for very
+   active phases (doubles nba compile time).
+4. MIN_NODES (50000) is a size proxy for "activity too high to gain"; a large design with very high
+   activity can still be slower. Revisit if a gate or extra design shows that.
+5. test_regress sweeps with --rtl-fast must set VERILATOR_RTLFAST_MIN_NODES=0, otherwise the small
+   test designs are not gated.
+6. Ask Yilou about the gate proposals (LargeBoom; extra random-input designs, VeeR EL2 gated).
+7. Do not branch on change bits in hot code (three negative results).
 
 ## Operational notes
 - Disk (~42 GB) fills up quickly: delete build dirs and test_regress/obj_vlt after use.
