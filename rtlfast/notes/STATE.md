@@ -70,6 +70,7 @@ Where things stand and what comes next. Overwrite this file at the end of every 
   RELATED_MIN_SIZE values.
 
 ## LargeBoom (proposed for the gate, see GATE_PROPOSALS.md)
+- d93d1d3: lockstep 50k PASS (cov 1.0); perf 1.350x (6.3k -> 8.5k c/s), +23% from VL_ATTR_OPTSIZE.
 - fb45a89: lockstep 50k PASS (cov 1.0); perf 1.163x only (5.9k -> 6.9k c/s); stock build 29 min,
   rtl-fast C++ build 6x faster. Scratch setup: design.json from GATE_PROPOSALS.md, sources from
   difftest/TestHarness-LargeBoom.tar.bz2 of the pinned gsim-ready-to-run commit.
