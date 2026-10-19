@@ -78,15 +78,17 @@ Where things stand and what comes next. Overwrite this file at the end of every 
   1.7x that of smallboom (cache pressure). Fission of >= 2000-node statements: no gain.
 
 ## Next steps
-1. smallboom: split huge always_ff statements whose outputs depend on disjoint parts of the
-   block (clone the block temporaries each piece needs), so registers whose inputs did not
-   change are not recomputed; or gate sub-blocks inside a partition function.
-2. Reduce compared outputs per run (9.5k/cycle on smallboom, 92% unchanged): e.g. partitioning
-   that minimises the cut (outputs read by other partitions).
-3. Wide operations (concat/shift via _vl_insert_WW) ~15% of smallboom instructions.
-4. P3: dedicated eval for designs whose clocks are top-level inputs (eval overhead is small,
-   ~1-2%, so low priority).
-5. P5: larger designs (LargeBoom) through GATE_PROPOSALS.md.
+1. Code size is the bottleneck of the gated model (instruction fetch): smallboom -Os +12%, LargeBoom
+   +23% from VL_ATTR_OPTSIZE. Next: measure which generated code dominates the executed bytes per
+   cycle (change detection, marks, dispatch in _eval_body__nba, logic) and shrink it.
+2. LargeBoom (1.35x) is the weak spot; propose it for the gate (GATE_PROPOSALS.md, done) and work on
+   its wasted runs (188k of 333k nodes/cycle).
+3. Code sharing between repeated instances (P4) now also matters for run time, but the redundant
+   share is small in BOOM (~17% of instantiated lines in smallboom; only 8% of partition function
+   text is duplicated after flattening). Would need per-instance flag arrays and un-inlined modules.
+4. Tried without gain this run (see LEDGER): statement fission (all sizes), 64-bit flag group tests,
+   finer/coarser partitions with bundles, -O1 attribute, optimize-for-size on _eval_body__nba.
+5. P3 (dedicated eval for top-level clocks) remains low priority (eval overhead ~1-2%).
 
 ## Operational notes
 - Disk (~42 GB) fills up quickly: delete build dirs and test_regress/obj_vlt after use.
