@@ -3,9 +3,13 @@
 Where things stand and what comes next. Overwrite this file at the end of every run.
 
 - Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation).
-- Last perf verdicts: b880403 (results/20261019-b880403): gate PASS, rocket 4.46x (the host got faster
-  for stock: ref 52.6k c/s vs 42k in run 3; dut 234k), smallboom 3.35x (best so far), coverage 1.0 / 1.0.
-  d93d1d3 (run 3): 5.41x / 2.97x. Compare ratios within one verdict only.
+- Last perf verdicts: b880403 (results/20261019-b880403): gate PASS, rocket 4.46x, smallboom 3.35x
+  (best), coverage 1.0 / 1.0. Re-run at the end of run 4 on the same source (results/20261019-6364dfb):
+  rocket 4.35x (56.7k -> 246.7k), smallboom 2.62x (21.2k -> 55.4k). d93d1d3 (run 3): 5.41x / 2.97x.
+- HOST MATTERS: run 4 ran on a Xeon 2.1 GHz with 2 MiB L2 per core and 260 MiB shared L3 (run 3: 2.8 GHz,
+  1 MiB L2, 33 MiB L3). Stock's large straight-line code profits from big, quiet caches much more than the
+  gated model: stock smallboom moved 15.1k -> 21.2k c/s within run 4 while the dut moved 50.5k -> 55.4k.
+  Ratios are only comparable within one verdict or one interleaved A/B; record `lscpu` with every verdict.
 - HEAD src = 0651d80 (gate check PASS, results/20261019-0651d80) = b880403 plus a statistics counter
   and a test; no code generation change since b880403.
 - Coverage: under --rtl-fast V3Localize keeps user signals (not internal) as members, so
