@@ -58,6 +58,10 @@
 // the next statement is unrelated to it (it neither reads what the partition
 // writes nor shares most of its inputs), so unrelated logic that happens to be
 // adjacent in the order does not run together.
+//
+// Consecutive small gated partitions are evaluated by one function (a
+// 'bundle'), called when one of them is dirty; each member still checks its
+// own flag. This saves function calls without changing the order.
 //*************************************************************************
 
 #include "V3PchAstNoMT.h"  // VL_MT_DISABLED_CODE_UNIT
@@ -273,6 +277,9 @@ class RtlFastGate final {
     // Size limit for groups of impure statements; these are mostly skipped as a
     // whole, but huge functions are slow to compile
     static constexpr size_t IMPURE_GROUP_SIZE = 800;
+    // Gated partitions up to this size are evaluated in bundles of up to BUNDLE_SIZE
+    static constexpr size_t BUNDLE_MEMBER_SIZE = 150;
+    static constexpr size_t BUNDLE_SIZE = 800;
 
     enum class Kind : uint8_t {
         GATED,  // Pure statements, run when an input changed
@@ -326,6 +333,10 @@ class RtlFastGate final {
     AstVarScope* m_dirtyp = nullptr;  // The dirty flag array
     const AstNode* m_unknownp = nullptr;  // Node with effects that cannot be analyzed
     size_t m_partitionSize = PARTITION_SIZE;
+    size_t m_bundleMemberSize = BUNDLE_MEMBER_SIZE;
+    size_t m_bundleSize = BUNDLE_SIZE;
+    size_t m_nBundled = 0;  // Partitions evaluated in bundles
+    size_t m_nPersistentTemps = 0;  // Block temporaries made module temporaries
     // Development profiling (VERILATOR_RTLFAST_PROFILE=<map file>): run and change counters
     string m_profFile;
     AstVarScope* m_profRunsp = nullptr;  // Runs of each partition
@@ -743,6 +754,29 @@ class RtlFastGate final {
                 }
             }
         }
+        // V3Localize makes a block temporary used by one function a local of
+        // it, assuming each call writes it before reading it. That no longer
+        // holds when it carries a value between partitions (or between runs of
+        // one partition), so such variables become module temporaries.
+        std::map<const AstVarScope*, size_t> referencingPart;
+        std::set<AstVar*> persistent;
+        for (size_t p = 0; p < m_parts.size(); ++p) {
+            const Part& part = m_parts[p];
+            for (AstVarScope* const vscp : part.m_ins) persistent.insert(vscp->varp());
+            for (const size_t i : part.m_stmts) {
+                for (const auto* const vscpsp : {&m_stmts[i].m_reads, &m_stmts[i].m_writes}) {
+                    for (AstVarScope* const vscp : *vscpsp) {
+                        const auto pair = referencingPart.emplace(vscp, p);
+                        if (pair.first->second != p) persistent.insert(vscp->varp());
+                    }
+                }
+            }
+        }
+        for (AstVar* const varp : persistent) {
+            if (varp->varType() != VVarType::BLOCKTEMP) continue;
+            varp->varType(VVarType::MODULETEMP);
+            ++m_nPersistentTemps;
+        }
         // Flags and consumers
         for (Part& part : m_parts) {
             if (part.m_kind == Kind::ALWAYS) continue;
@@ -1000,9 +1034,34 @@ class RtlFastGate final {
                 VL_DO_DANGLING(callsp->unlinkFrBackWithNext()->deleteTree(), callsp);
             }
         }
+        // Bundles: runs of consecutive small gated partitions evaluated by one
+        // function, called when one of them is dirty
+        std::vector<int> bundleOf(m_parts.size(), -1);
+        int nBundles = 0;
+        for (size_t p = 0; p < m_parts.size();) {
+            const Part& first = m_parts[p];
+            size_t q = p;
+            size_t total = 0;
+            while (q < m_parts.size() && m_parts[q].m_kind == Kind::GATED
+                   && m_parts[q].m_size <= m_bundleMemberSize
+                   && m_parts[q].m_domain == first.m_domain
+                   && m_parts[q].m_scopep == first.m_scopep
+                   && total + m_parts[q].m_size <= m_bundleSize) {
+                total += m_parts[q].m_size;
+                ++q;
+            }
+            if (q - p < 2) {
+                ++p;
+                continue;
+            }
+            for (; p < q; ++p) bundleOf[p] = nBundles;
+            ++nBundles;
+        }
         // Build the partition functions
         std::map<AstScope*, size_t> funcNums;
+        AstCFunc* bundlep = nullptr;
         for (Part& part : m_parts) {
+            const size_t partIndex = &part - &m_parts[0];
             AstNode* stmtsp = nullptr;
             for (const size_t i : part.m_stmts) {
                 const Stmt& stmt = m_stmts[i];
@@ -1021,6 +1080,35 @@ class RtlFastGate final {
             const string name = string{"_nba_rtlfast_"} + kindName + "__"
                                 + part.m_scopep->nameDotless() + "__"
                                 + std::to_string(funcNums[part.m_scopep]++);
+            const int bundle = bundleOf[partIndex];
+            if (bundle >= 0) {
+                if (!partIndex || bundleOf[partIndex - 1] != bundle) {
+                    bundlep = newFunc(part.m_scopep, string{"_nba_rtlfast_bundle__"}
+                                                         + part.m_scopep->nameDotless() + "__"
+                                                         + std::to_string(funcNums[part.m_scopep]++));
+                    AstNodeExpr* anyp = nullptr;
+                    for (size_t q = partIndex; q < m_parts.size() && bundleOf[q] == bundle; ++q) {
+                        AstNodeExpr* const bitp = flagRef(flp, m_parts[q].m_flag, VAccess::READ);
+                        anyp = anyp ? new AstOr{flp, anyp, bitp} : bitp;
+                    }
+                    AstCCall* const callp = new AstCCall{flp, bundlep};
+                    callp->dtypeSetVoid();
+                    AstIf* const ifp = new AstIf{flp, anyp};
+                    ifp->addThensp(callp->makeStmt());
+                    m_domains[part.m_domain]->addThensp(ifp);
+                }
+                // The member's statements, with change detection, guarded by its flag
+                AstCFunc* const tempFuncp = new AstCFunc{flp, name, part.m_scopep, ""};
+                tempFuncp->addStmtsp(stmtsp);
+                addChangeDetect(flp, part, tempFuncp);
+                AstIf* const ifp = new AstIf{flp, flagRef(flp, part.m_flag, VAccess::READ)};
+                ifp->addThensp(setFlag(flp, part.m_flag, false));
+                ifp->addThensp(tempFuncp->stmtsp()->unlinkFrBackWithNext());
+                bundlep->addStmtsp(ifp);
+                VL_DO_DANGLING(tempFuncp->deleteTree(), tempFuncp);
+                ++m_nBundled;
+                continue;
+            }
             AstCFunc* const funcp = newFunc(part.m_scopep, name);
             funcp->addStmtsp(stmtsp);
             addChangeDetect(flp, part, funcp);
@@ -1079,6 +1167,12 @@ public:
             m_partitionSize = std::max(1, std::atoi(envp));
         }
         if (const char* const envp = std::getenv("VERILATOR_RTLFAST_PROFILE")) m_profFile = envp;
+        if (const char* const envp = std::getenv("VERILATOR_RTLFAST_BUNDLE_MEMBER")) {
+            m_bundleMemberSize = std::atoi(envp);
+        }
+        if (const char* const envp = std::getenv("VERILATOR_RTLFAST_BUNDLE")) {
+            m_bundleSize = std::atoi(envp);
+        }
         AstCFunc* const bodyp = findFunc(netlistp, "_eval_body__nba");
         if (!bodyp || !collect(bodyp)) {
             UINFO(1, "rtl-fast: nba region has an unexpected shape, not gated");
@@ -1115,6 +1209,8 @@ public:
         V3Stats::addStat("RtlFast, partitions gated", nParts[Kind::GATED]);
         V3Stats::addStat("RtlFast, partitions conditional", nParts[Kind::COND]);
         V3Stats::addStat("RtlFast, partitions always run", nParts[Kind::ALWAYS]);
+        V3Stats::addStat("RtlFast, partitions in bundles", m_nBundled);
+        V3Stats::addStat("RtlFast, block temporaries kept", m_nPersistentTemps);
         V3Stats::addStat("RtlFast, partitions always run (too many marks)", m_nUngated);
         V3Stats::addStat("RtlFast, partition outputs compared", nOuts);
         V3Stats::addStat("RtlFast, outputs compared at write sites", m_nWriteSites);
