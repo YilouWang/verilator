@@ -81,6 +81,11 @@ Where things stand and what comes next. Overwrite this file at the end of every 
 1. Code size is the bottleneck of the gated model (instruction fetch): smallboom -Os +12%, LargeBoom
    +23% from VL_ATTR_OPTSIZE. Next: measure which generated code dominates the executed bytes per
    cycle (change detection, marks, dispatch in _eval_body__nba, logic) and shrink it.
+   Candidate designs: (a) lay out the outputs of each change group contiguously (V3VariableOrder
+   under --rtl-fast, keyed by writer partition and consumer set) and replace per-output compares
+   by one snapshot + memcmp per group; (b) keep per-output compares but encode marks as data (a
+   per-partition table walked only for set change bits); a plain branch around the marks was
+   measured slower (mispredictions), so (b) needs care.
 2. LargeBoom (1.35x) is the weak spot; propose it for the gate (GATE_PROPOSALS.md, done) and work on
    its wasted runs (188k of 333k nodes/cycle).
 3. Code sharing between repeated instances (P4) now also matters for run time, but the redundant
