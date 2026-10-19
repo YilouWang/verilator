@@ -3,11 +3,10 @@
 Where things stand and what comes next. Overwrite this file at the end of every run.
 
 - Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation).
-- Last perf verdicts: f792bc5 (results/20261019-f792bc5): gate PASS, rocket 4.98x,
-  smallboom 2.20x (1a5b10e had 2.41x; within noise), coverage 0.981 / 0.992.
-  Later commits up to HEAD only reformat code / notes (gate check verdicts in results/).
-- Coverage falls slowly as partitions grow (V3Localize localizes comb temps that now live in
-  one partition function); the gate needs >= 0.95.
+- Last perf verdicts: 47e82bb (results/20261019-47e82bb): gate PASS, rocket 5.04x,
+  smallboom 2.26x, coverage 0.9998 / 1.0.
+- Coverage: under --rtl-fast V3Localize keeps user signals (not internal) as members, so
+  coverage no longer depends on partition shapes (47e82bb).
 
 ## What exists
 - `--rtl-fast` option (src/V3Options.*), docs in docs/guide/exe_verilator.rst, bin/verilator help.
