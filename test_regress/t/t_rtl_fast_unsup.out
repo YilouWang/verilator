@@ -1,4 +1,4 @@
-%Error: t/t_rtl_fast_unsup.v:15:31: Unsupported: --rtl-fast does not support DPI functions or tasks
+%Error: t/t_rtl_fast_unsup.v:15:31: Unsupported: --rtl-fast does not support DPI import functions or tasks
    15 |   import "DPI-C" function int dpi_f(int a);
       |                               ^~~~~
         ... See the manual at https://verilator.org/verilator_doc.html?v=latest for more assistance.

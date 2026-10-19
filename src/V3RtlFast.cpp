@@ -18,7 +18,8 @@
 // produces a different result:
 //   - timing controls (delays, statement event controls, wait, fork with join)
 //   - classes (other than the std package)
-//   - DPI imports and exports
+//   - DPI imports (DPI exports are allowed: the variables they write are
+//     handled like any variable written outside the 'nba' region)
 //   - user C code ($c)
 //
 // gateActivity makes the 'nba' region activity driven. The nba statements
@@ -98,7 +99,7 @@ class RtlFastSubsetVisitor final : public VNVisitorConst {
         iterateChildrenConst(nodep);
     }
     void visit(AstNodeFTask* nodep) override {
-        if (nodep->dpiImport() || nodep->dpiExport()) reject(nodep, "DPI functions or tasks");
+        if (nodep->dpiImport()) reject(nodep, "DPI import functions or tasks");
         iterateChildrenConst(nodep);
     }
     void visit(AstCStmtUser* nodep) override { reject(nodep, "$c statements"); }

@@ -1,0 +1,22 @@
+cyc=0 r=0 s=0
+cyc=1 r=7 s=1
+cyc=2 r=7 s=22
+cyc=3 r=7 s=22
+cyc=4 r=28 s=22
+cyc=5 r=28 s=85
+cyc=6 r=28 s=85
+cyc=7 r=49 s=85
+cyc=8 r=49 s=148
+cyc=9 r=49 s=148
+cyc=10 r=70 s=148
+cyc=11 r=70 s=211
+cyc=12 r=70 s=211
+cyc=13 r=91 s=211
+cyc=14 r=91 s=274
+cyc=15 r=91 s=274
+cyc=16 r=112 s=274
+cyc=17 r=112 s=337
+cyc=18 r=112 s=337
+cyc=19 r=133 s=337
+cyc=20 r=133 s=400
+*-* All Finished *-*

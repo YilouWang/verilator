@@ -1918,7 +1918,8 @@ Summary:
 
    Experimental. Optimize the model for large synthesizable, synchronous
    RTL designs. The design must not use timing controls, fork, classes,
-   DPI or user C code (:code:`$c`); such input is rejected with an error.
+   DPI imports or user C code (:code:`$c`); such input is rejected with an
+   error. DPI exports are allowed.
    Cannot be used with :vlopt:`--timing` or :vlopt:`--threads` above 1.
 
 .. option:: --runtime-debug
