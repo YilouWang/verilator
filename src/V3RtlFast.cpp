@@ -263,7 +263,7 @@ public:
 
 class RtlFastGate final {
     // Statements are merged into one gated partition up to this size (in AST nodes)
-    static constexpr size_t PARTITION_SIZE = 200;
+    static constexpr size_t PARTITION_SIZE = 800;
     // Limit of consumer marks generated for one variable (see partition())
     static constexpr size_t MAX_MARKS_PER_VARIABLE = 1 << 16;
     // A gated partition of at least this size only takes related statements
