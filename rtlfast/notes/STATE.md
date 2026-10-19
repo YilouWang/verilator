@@ -101,3 +101,7 @@ Where things stand and what comes next. Overwrite this file at the end of every 
 - Do not build in /workspace/verilator while the gate runs; develop in a separate worktree.
 - Long `sleep` in one tool call (>~2 min) sometimes crashes the tool; VM restarts kill the
   heartbeat (restart it; script in the run's /workspace/heartbeat.sh pattern).
+- Run 3 workflow that worked: develop in a second worktree (/workspace/dev), commit there, then
+  fast-forward /workspace/verilator to the commit, rebuild and run gate check + perf in the
+  background; A/B builds with rtlfast/tools/build.sh and interleaved runs; always diff the Linux
+  boot text of A and B before trusting a speedup. Keep tool-call sleeps under ~90 s.
