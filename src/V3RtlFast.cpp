@@ -917,7 +917,8 @@ class RtlFastGate final {
             // A partition need not rerun after changing a variable it does not read
             std::vector<int> consumers;
             for (const int flag : info.m_consumerFlags) {
-                if (flag != part.m_flag || !part.m_writerIns.count(vscp)) consumers.push_back(flag);
+                const bool own = flag == part.m_flag && part.m_writerIns.count(vscp);
+                if (!own) consumers.push_back(flag);
             }
             if (consumers.empty()) continue;
             AstVarScope*& changep = groupChanges[consumers];
@@ -940,11 +941,11 @@ class RtlFastGate final {
                     prep, new AstAssign{flp, new AstVarRef{flp, oldp, VAccess::WRITE},
                                         new AstVarRef{flp, vscp, VAccess::READ}});
                 postp = AstNode::addNext(
-                    postp,
-                    new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
-                                  new AstOr{flp, new AstVarRef{flp, changep, VAccess::READ},
-                                            new AstNeq{flp, new AstVarRef{flp, vscp, VAccess::READ},
-                                                       new AstVarRef{flp, oldp, VAccess::READ}}}});
+                    postp, new AstAssign{
+                               flp, new AstVarRef{flp, changep, VAccess::WRITE},
+                               new AstOr{flp, new AstVarRef{flp, changep, VAccess::READ},
+                                         new AstNeq{flp, new AstVarRef{flp, vscp, VAccess::READ},
+                                                    new AstVarRef{flp, oldp, VAccess::READ}}}});
                 ++m_nSnapshots;
             }
             if (m_profRunsp) {
@@ -1083,9 +1084,10 @@ class RtlFastGate final {
             const int bundle = bundleOf[partIndex];
             if (bundle >= 0) {
                 if (!partIndex || bundleOf[partIndex - 1] != bundle) {
-                    bundlep = newFunc(part.m_scopep, string{"_nba_rtlfast_bundle__"}
-                                                         + part.m_scopep->nameDotless() + "__"
-                                                         + std::to_string(funcNums[part.m_scopep]++));
+                    bundlep
+                        = newFunc(part.m_scopep, string{"_nba_rtlfast_bundle__"}
+                                                     + part.m_scopep->nameDotless() + "__"
+                                                     + std::to_string(funcNums[part.m_scopep]++));
                     AstNodeExpr* anyp = nullptr;
                     for (size_t q = partIndex; q < m_parts.size() && bundleOf[q] == bundle; ++q) {
                         AstNodeExpr* const bitp = flagRef(flp, m_parts[q].m_flag, VAccess::READ);
