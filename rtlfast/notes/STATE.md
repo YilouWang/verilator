@@ -3,8 +3,11 @@
 Where things stand and what comes next. Overwrite this file at the end of every run.
 
 - Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation).
-- Last perf verdicts: d93d1d3 (results/20261019-d93d1d3): gate PASS, rocket 5.41x,
-  smallboom 2.97x, coverage 1.0 / 1.0. (fb45a89: 4.99x / 2.57x; 84f8f79: 5.19x / 2.56x.)
+- Last perf verdicts: b880403 (results/20261019-b880403): gate PASS, rocket 4.46x (host faster for
+  stock: ref 52.6k c/s vs 42k before; dut 234k), smallboom 3.35x (best), coverage 1.0 / 1.0.
+  d93d1d3: 5.41x / 2.97x. Compare ratios within one verdict only.
+- Run 4 (in progress): packed arrays/structs are now compared (b880403); next under test: branch around
+  marks of change bits with >= 16 consumers (high fanout reset sync: 855 marks per cycle).
 - Coverage: under --rtl-fast V3Localize keeps user signals (not internal) as members, so
   coverage no longer depends on partition shapes (47e82bb).
 
