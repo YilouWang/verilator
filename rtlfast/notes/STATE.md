@@ -3,8 +3,9 @@
 Where things stand and what comes next. Overwrite this file at the end of every run.
 
 - Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation).
-- Last perf verdicts: 84f8f79 (results/20261019-84f8f79): gate PASS, rocket 5.19x,
-  smallboom 2.56x, coverage 0.9998 / 1.0. (47e82bb: 5.04x / 2.26x.)
+- Last perf verdicts: fb45a89 (results/20261019-fb45a89): gate PASS, rocket 4.99x,
+  smallboom 2.57x, coverage 1.0 / 1.0. (84f8f79: 5.19x / 2.56x; 47e82bb: 5.04x / 2.26x;
+  differences between these are within the host noise.)
 - Coverage: under --rtl-fast V3Localize keeps user signals (not internal) as members, so
   coverage no longer depends on partition shapes (47e82bb).
 
@@ -32,7 +33,13 @@ Where things stand and what comes next. Overwrite this file at the end of every 
       lhs = tmp` at simple write sites (snapshot otherwise); at partition end each consumer
       byte flag is ORed with the change bits of the outputs it reads. Temporaries are
       BLOCKTEMP so V3Localize makes them locals.
-    - dev knobs (not for users): VERILATOR_RTLFAST_PARTITION_SIZE, VERILATOR_RTLFAST_PROFILE=<map>
+    - bundles: consecutive gated partitions of <= 150 nodes share one function (<= 800 nodes),
+      called when one member flag is set; each member checks its own flag.
+    - block temporaries that cross partitions or are partition inputs become MODULETEMP, so
+      V3Localize does not turn them into function locals (needed for bundles).
+    - change bits are shared by outputs with identical consumer lists; a partition does not mark
+      itself for variables that are its inputs only because of other writers.
+    - dev knobs (not for users): VERILATOR_RTLFAST_BUNDLE_MEMBER / _BUNDLE, VERILATOR_RTLFAST_PARTITION_SIZE, VERILATOR_RTLFAST_PROFILE=<map>
       (run/change counters; dump with HARNESS=rtlfast/tools/prof_harness.cpp in tools/build.sh).
 - Tests: t_rtl_fast_unsup, t_rtl_fast_opt_bad, t_rtl_fast_gate (output vs stock golden),
   t_rtl_fast_many_marks. test_regress vlt with --rtl-fast on ~2200 tests: no wrong results.
