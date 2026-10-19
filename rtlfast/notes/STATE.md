@@ -2,18 +2,22 @@
 
 Where things stand and what comes next. Overwrite this file at the end of every run.
 
-- Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation).
-- Last perf verdicts: b880403 (results/20261019-b880403): gate PASS, rocket 4.46x, smallboom 3.35x
-  (best), coverage 1.0 / 1.0. Re-run at the end of run 4 on the same source (results/20261019-6364dfb):
-  rocket 4.35x (56.7k -> 246.7k), smallboom 2.62x (21.2k -> 55.4k). d93d1d3 (run 3): 5.41x / 2.97x.
-- HOST MATTERS: run 4 ran on a Xeon 2.1 GHz with 2 MiB L2 per core and 260 MiB shared L3 (run 3: 2.8 GHz,
-  1 MiB L2, 33 MiB L3). Stock's large straight-line code profits from big, quiet caches much more than the
-  gated model: stock smallboom moved 15.1k -> 21.2k c/s within run 4 while the dut moved 50.5k -> 55.4k.
-  Ratios are only comparable within one verdict or one interleaved A/B; record `lscpu` with every verdict.
-- HEAD src = 0651d80 (gate check PASS, results/20261019-0651d80) = b880403 plus a statistics counter
-  and a test; no code generation change since b880403.
+- Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation), P5 started
+  (extra designs with random inputs, rtlfast/extra/setup.sh).
+- HEAD src = 06d3124 (run 5): 0651d80 plus DPI exports allowed under --rtl-fast. Gate check PASS
+  (results/20261019-06d3124). No code generation change since b880403.
+- Last perf verdicts: b880403 (results/20261019-b880403): rocket 4.46x, smallboom 3.35x; end of run 4
+  re-run (results/20261019-6364dfb): rocket 4.35x, smallboom 2.62x; d93d1d3 (run 3): 5.41x / 2.97x.
+  Run 5 did not produce a faster revision (all experiments neutral or negative, see LEDGER).
+- HOST MATTERS: run 4 ran on a Xeon 2.1 GHz with 2 MiB L2 per core and 260 MiB L3, runs 3 and 5 on a
+  Xeon 2.8 GHz with 1 MiB L2 and 33 MiB L3. Stock profits from big caches much more than the gated
+  model. Ratios are only comparable within one verdict or one interleaved A/B; record `lscpu`.
 - Coverage: under --rtl-fast V3Localize keeps user signals (not internal) as members, so
   coverage no longer depends on partition shapes (47e82bb).
+- Known weakness (run 5): small designs with very high activity get SLOWER: ibex with random inputs
+  0.64x to 0.70x (75% of nba nodes active, nba region ~1.5 times per cycle, 528 variables written by
+  replicated ico/act logic compared with shadows at every nba region start = 32% of the time).
+  picorv32 1.2x and VeeR EL2 1.39x faster with random inputs.
 
 ## What exists
 - `--rtl-fast` option (src/V3Options.*), docs in docs/guide/exe_verilator.rst, bin/verilator help.
@@ -51,14 +55,18 @@ Where things stand and what comes next. Overwrite this file at the end of every 
     - partition functions carry AstCFunc::optSize -> VL_ATTR_OPTSIZE (GCC optimize("Os"), clang
       minsize): the gated model is instruction-fetch bound (smallboom +12-15%; stock gets slower
       at -Os, so this is specific to the gated code).
+    - DPI exports are allowed (06d3124): variables they write are outside writes (shadow compare);
+      DPI imports, timing, fork, classes and $c are rejected.
     - dev knobs (not for users): VERILATOR_RTLFAST_BUNDLE_MEMBER / _BUNDLE, VERILATOR_RTLFAST_PARTITION_SIZE, VERILATOR_RTLFAST_PROFILE=<map>
       (run/change counters; dump with HARNESS=rtlfast/tools/prof_harness.cpp in tools/build.sh).
-- Tests: t_rtl_fast_unsup, t_rtl_fast_opt_bad, t_rtl_fast_gate, t_rtl_fast_bundle and
+- Tests: t_rtl_fast_unsup, t_rtl_fast_opt_bad, t_rtl_fast_gate, t_rtl_fast_bundle, t_rtl_fast_dpi_export and
   t_rtl_fast_packed (output vs stock golden; packed uses VERILATOR_RTLFAST_PARTITION_SIZE=1 and
   checks "outputs not compared 0"), t_rtl_fast_many_marks. test_regress vlt with --rtl-fast at d93d1d3 on ~3100 tests
   (lists: run-3 LEDGER): no wrong results; VCD-golden failures also fail on stock, VCDs identical.
 - rtlfast/tools/prof_analyze.py <map> <prof-counters.txt> [n] [m]: partition activity table and the
   inputs that trigger runs without output change (needs a VERILATOR_RTLFAST_PROFILE build).
+- rtlfast/extra/setup.sh <dir>: picorv32, ibex (default and full config), VeeR EL2 at pinned commits with
+  design.json files for lockstep.py (random inputs). Verdicts in results/20261019-3fb91a5/extra-*.json.
 - rtlfast/tools/build.sh: build one benchmark with the oracle harness (run from any cwd; checks
   that the local harness object is linked).
 
@@ -100,24 +108,18 @@ Where things stand and what comes next. Overwrite this file at the end of every 
   1.7x that of smallboom (cache pressure). Fission of >= 2000-node statements: no gain.
 
 ## Next steps
-1. LargeBoom: re-profile with the packed fix (perf per function joined with profile counters, as in
-   run 4) and look for pathologies like the packed one: ask "why does this partition run?" for the
-   most expensive functions. That is the method that found the only win of run 4.
-2. Change detection is ~20% of hot instructions. The remaining structural idea: lay out the outputs
-   of each change group contiguously (V3VariableOrder keeps the AstVar order within a size class,
-   so V3RtlFast can reorder AstVars; run 4 checked that reordering alone is neutral) and compare a
-   group with one snapshot + memcmp instead of per-output compares. Needs a node or emitter support
-   for "address range of these members" and a check at emit time that the members are contiguous.
-   Gain only where groups have several outputs (rocket: 10604 outputs share 4690 change bits).
-3. Do not branch on change bits in hot code (three negative results now: per-output mark branches,
-   one branch around all marks, guards evaluated under 'if (ch)' = 0.65x).
-4. Masked high-rate inputs (see Measurements) are the main source of wasted runs. Guard-aware marks
-   did not pay; what might: splitting straight-line mux statements (CSR read data, TLB entry
-   matches) so that the masked terms become separate statements whose outputs do not change.
-   Needs a cost model in bytes executed, not nodes.
-5. Code sharing between repeated instances (P4, ARMOR-style packing of isomorphic narrow nodes)
-   would cut code bytes, but needs un-inlined modules and per-instance flags; large project.
-6. P3 (dedicated eval for top-level clocks) remains low priority (eval overhead ~1-2%).
+1. Run 5 closed most cheap performance directions (all in LEDGER with numbers): base pointers
+   (code -7 to -11%, time +0 to +3%), software prefetch of partition code (worse), affinity rule
+   for new inputs, high-fanout isolation, guards on LargeBoom (all worse or neutral). Without
+   hardware counters the remaining bottleneck of the gated model cannot be pinned down; the
+   evidence: per partition run cost, not code size or fetch latency, dominates.
+2. Structural options left: (a) sharing code between repeated instances (needs per-instance
+   layout, parametrised constants, aligned partitioning; LargeBoom exact-duplicate potential only
+   12% of executed text), (b) a runtime fallback to ungated evaluation for very active phases
+   (needs a second code copy, hurts build time), (c) write-site change detection in ico/act code to
+   replace shadow compares (helps ibex-like designs with many replicated comb variables).
+3. Ask Yilou about the gate proposals (LargeBoom; random-input picorv32/ibex/VeeR).
+4. Do not branch on change bits in hot code (three negative results).
 
 ## Operational notes
 - Disk (~42 GB) fills up quickly: delete build dirs and test_regress/obj_vlt after use.
