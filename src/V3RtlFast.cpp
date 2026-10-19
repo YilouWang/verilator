@@ -62,6 +62,7 @@
 #include "V3Stats.h"
 
 #include <algorithm>
+#include <fstream>
 #include <map>
 #include <queue>
 #include <set>
@@ -314,6 +315,13 @@ class RtlFastGate final {
     AstVarScope* m_dirtyp = nullptr;  // The dirty flag array
     const AstNode* m_unknownp = nullptr;  // Node with effects that cannot be analyzed
     size_t m_partitionSize = PARTITION_SIZE;
+    // Development profiling (VERILATOR_RTLFAST_PROFILE=<map file>): run and change counters
+    string m_profFile;
+    AstVarScope* m_profRunsp = nullptr;  // Runs of each partition
+    AstVarScope* m_profAnyp = nullptr;  // Runs of each partition that changed an output
+    AstVarScope* m_profChgp = nullptr;  // Changes of each compared output
+    std::vector<string> m_profMap;  // Lines of the map file
+    int m_profOuts = 0;
     int m_nFlags = 0;
     size_t m_nTemps = 0;
     size_t m_nShadows = 0;
@@ -342,6 +350,13 @@ class RtlFastGate final {
             "__Vrtlfast_" + prefix + std::to_string(m_nTemps++), dtypep);
         vscp->varp()->noReset(true);
         vscp->varp()->isInternal(true);
+        return vscp;
+    }
+    // Temporary used only within one partition function, so V3Localize makes
+    // it a local even where it is assigned under a branch
+    AstVarScope* newLocalTemp(const string& prefix, AstNodeDType* dtypep) {
+        AstVarScope* const vscp = newTemp(prefix, dtypep);
+        vscp->varp()->varType(VVarType::BLOCKTEMP);
         return vscp;
     }
 
@@ -728,7 +743,7 @@ class RtlFastGate final {
         if (VN_IS(assignp->rhsp(), VarRef) || VN_IS(assignp->rhsp(), Const)) {
             newp = assignp->rhsp()->cloneTree(false);
         } else {
-            AstVarScope* const tempp = newTemp("wr", lhsp->dtypep());
+            AstVarScope* const tempp = newLocalTemp("wr", lhsp->dtypep());
             assignp->addHereThisAsNext(new AstAssign{flp,
                                                      new AstVarRef{flp, tempp, VAccess::WRITE},
                                                      assignp->rhsp()->unlinkFrBack()});
@@ -740,6 +755,25 @@ class RtlFastGate final {
                           new AstOr{flp, new AstVarRef{flp, changep, VAccess::READ},
                                     new AstNeq{flp, oldp, newp}}});
         ++m_nWriteSites;
+    }
+    // 'array[index] += condp ? 1 : 0' (or += 1 without condp)
+    AstNodeStmt* profCount(FileLine* flp, AstVarScope* arrayp, int index, AstNodeExpr* condp) {
+        AstNodeExpr* incp = new AstConst{flp, AstConst::WidthedValue{}, 32, 1};
+        if (condp) {
+            incp = new AstCond{flp, condp, incp, new AstConst{flp, AstConst::WidthedValue{}, 32, 0}};
+        }
+        return new AstAssign{
+            flp, new AstArraySel{flp, new AstVarRef{flp, arrayp, VAccess::WRITE}, index},
+            new AstAdd{flp, new AstArraySel{flp, new AstVarRef{flp, arrayp, VAccess::READ}, index},
+                       incp}};
+    }
+    AstVarScope* profArray(FileLine* flp, const string& name, int size) {
+        AstUnpackArrayDType* const arrayp = new AstUnpackArrayDType{
+            flp, m_netlistp->findUInt32DType(), new AstRange{flp, std::max(size, 1) - 1, 0}};
+        m_netlistp->typeTablep()->addTypesp(arrayp);
+        AstVarScope* const vscp = m_netlistp->topScopep()->createTemp(name, arrayp);
+        vscp->varp()->isInternal(true);
+        return vscp;
     }
     // Add change detection of the outputs of a partition to its function
     void addChangeDetect(FileLine* flp, const Part& part, AstCFunc* funcp) {
@@ -769,6 +803,7 @@ class RtlFastGate final {
         AstNode* prep = nullptr;
         AstNode* postp = nullptr;
         std::map<int, AstNodeExpr*> flagChanges;  // Consumer flag -> OR of change bits
+        std::vector<std::pair<int, AstVarScope*>> profChanges;
         for (AstVarScope* const vscp : part.m_outs) {
             const VarInfo& info = varInfo(vscp);
             if (info.m_consumerFlags.empty()) continue;
@@ -777,7 +812,7 @@ class RtlFastGate final {
                 postp = append(postp, markConsumers(flp, info));
                 continue;
             }
-            AstVarScope* const changep = newTemp("ch", m_netlistp->findBitDType());
+            AstVarScope* const changep = newLocalTemp("ch", m_netlistp->findBitDType());
             prep = AstNode::addNext(prep, new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
                                                         new AstConst{flp, AstConst::BitFalse{}}});
             const auto it = sites.find(vscp);
@@ -786,7 +821,7 @@ class RtlFastGate final {
                     addWriteSiteCompare(assignp, changep);
                 }
             } else {
-                AstVarScope* const oldp = newTemp("old", vscp->dtypep());
+                AstVarScope* const oldp = newLocalTemp("old", vscp->dtypep());
                 prep = AstNode::addNext(prep, new AstAssign{flp, new AstVarRef{flp, oldp, VAccess::WRITE},
                                                             new AstVarRef{flp, vscp, VAccess::READ}});
                 postp = AstNode::addNext(
@@ -795,11 +830,30 @@ class RtlFastGate final {
                                                     new AstVarRef{flp, oldp, VAccess::READ}}});
                 ++m_nSnapshots;
             }
+            if (m_profRunsp) {
+                m_profMap.push_back("O " + std::to_string(m_profOuts) + " "
+                                    + std::to_string(&part - &m_parts[0]) + " "
+                                    + std::to_string(info.m_consumerFlags.size()) + " "
+                                    + vscp->prettyName());
+                profChanges.emplace_back(m_profOuts++, changep);
+            }
             for (const int flag : info.m_consumerFlags) {
                 AstNodeExpr*& exprp = flagChanges[flag];
                 AstNodeExpr* const bitp = new AstVarRef{flp, changep, VAccess::READ};
                 exprp = exprp ? new AstOr{flp, exprp, bitp} : bitp;
             }
+        }
+        if (m_profRunsp) {
+            const int p = static_cast<int>(&part - &m_parts[0]);
+            AstNodeExpr* anyp = nullptr;
+            for (const auto& pair : profChanges) {
+                AstNodeExpr* const bitp = new AstVarRef{flp, pair.second, VAccess::READ};
+                anyp = anyp ? new AstOr{flp, anyp, bitp} : bitp;
+                postp = AstNode::addNext(postp, profCount(flp, m_profChgp, pair.first,
+                                                          new AstVarRef{flp, pair.second, VAccess::READ}));
+            }
+            postp = AstNode::addNext(postp, profCount(flp, m_profRunsp, p, nullptr));
+            if (anyp) postp = AstNode::addNext(postp, profCount(flp, m_profAnyp, p, anyp));
         }
         for (const auto& pair : flagChanges) {
             postp = AstNode::addNext(
@@ -830,6 +884,24 @@ class RtlFastGate final {
         m_dirtyp = m_netlistp->topScopep()->createTemp("__Vrtlfast_dirty", arrayp);
         m_dirtyp->varp()->noReset(true);
         m_dirtyp->varp()->isInternal(true);
+        if (!m_profFile.empty()) {
+            int nOuts = 0;
+            for (const Part& part : m_parts) {
+                for (AstVarScope* const vscp : part.m_outs) {
+                    if (!varInfo(vscp).m_consumerFlags.empty()) ++nOuts;
+                }
+                m_profMap.push_back("P " + std::to_string(&part - &m_parts[0]) + " "
+                                    + std::to_string(static_cast<int>(part.m_kind)) + " "
+                                    + std::to_string(part.m_size) + " "
+                                    + std::to_string(part.m_stmts.size()) + " "
+                                    + std::to_string(part.m_ins.size()) + " "
+                                    + std::to_string(part.m_outs.size()));
+            }
+            const int nParts = static_cast<int>(m_parts.size());
+            m_profRunsp = profArray(flp, "__Vrtlfast_prof_runs", nParts);
+            m_profAnyp = profArray(flp, "__Vrtlfast_prof_any", nParts);
+            m_profChgp = profArray(flp, "__Vrtlfast_prof_chg", nOuts);
+        }
         // All partitions start dirty
         AstCFunc* const staticp = m_netlistp->evalFuncp(VEval::STATIC);
         for (int flag = 0; flag < m_nFlags; ++flag) staticp->addStmtsp(setFlag(flp, flag, true));
@@ -904,6 +976,10 @@ class RtlFastGate final {
         }
         if (prep) bodyp->stmtsp()->addHereThisAsNext(prep);
         if (postp) bodyp->addStmtsp(postp);
+        if (!m_profFile.empty()) {
+            std::ofstream os{m_profFile};
+            for (const string& line : m_profMap) os << line << "\n";
+        }
     }
 
 public:
@@ -913,6 +989,7 @@ public:
         if (const char* const envp = std::getenv("VERILATOR_RTLFAST_PARTITION_SIZE")) {
             m_partitionSize = std::max(1, std::atoi(envp));
         }
+        if (const char* const envp = std::getenv("VERILATOR_RTLFAST_PROFILE")) m_profFile = envp;
         AstCFunc* const bodyp = findFunc(netlistp, "_eval_body__nba");
         if (!bodyp || !collect(bodyp)) {
             UINFO(1, "rtl-fast: nba region has an unexpected shape, not gated");
