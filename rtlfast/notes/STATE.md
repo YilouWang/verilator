@@ -3,8 +3,8 @@
 Where things stand and what comes next. Overwrite this file at the end of every run.
 
 - Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation).
-- Last perf verdicts: 47e82bb (results/20261019-47e82bb): gate PASS, rocket 5.04x,
-  smallboom 2.26x, coverage 0.9998 / 1.0.
+- Last perf verdicts: 84f8f79 (results/20261019-84f8f79): gate PASS, rocket 5.19x,
+  smallboom 2.56x, coverage 0.9998 / 1.0. (47e82bb: 5.04x / 2.26x.)
 - Coverage: under --rtl-fast V3Localize keeps user signals (not internal) as members, so
   coverage no longer depends on partition shapes (47e82bb).
 
@@ -36,6 +36,8 @@ Where things stand and what comes next. Overwrite this file at the end of every 
       (run/change counters; dump with HARNESS=rtlfast/tools/prof_harness.cpp in tools/build.sh).
 - Tests: t_rtl_fast_unsup, t_rtl_fast_opt_bad, t_rtl_fast_gate (output vs stock golden),
   t_rtl_fast_many_marks. test_regress vlt with --rtl-fast on ~2200 tests: no wrong results.
+- rtlfast/tools/prof_analyze.py <map> <prof-counters.txt> [n] [m]: partition activity table and the
+  inputs that trigger runs without output change (needs a VERILATOR_RTLFAST_PROFILE build).
 - rtlfast/tools/build.sh: build one benchmark with the oracle harness (run from any cwd; checks
   that the local harness object is linked).
 
