@@ -270,7 +270,7 @@ class RtlFastGate final {
     static constexpr size_t RELATED_MIN_SIZE = 50;
     // Size limit for groups of impure statements; these are mostly skipped as a
     // whole, but huge functions are slow to compile
-    static constexpr size_t IMPURE_GROUP_SIZE = 4000;
+    static constexpr size_t IMPURE_GROUP_SIZE = 800;
 
     enum class Kind : uint8_t {
         GATED,  // Pure statements, run when an input changed
