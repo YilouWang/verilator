@@ -575,7 +575,18 @@ class RtlFastGate final {
         std::vector<bool> visited(n, false);
         uint32_t nextRank = 0;
         std::vector<std::pair<uint32_t, size_t>> stack;
-        for (uint32_t root = 0; root < n; ++root) {
+        // Walk the sinks in the order of the (hierarchical) name of the first
+        // variable they write, so logic of one module stays together
+        std::vector<string> keys(n);
+        std::vector<uint32_t> roots;
+        for (uint32_t i = 0; i < n; ++i) {
+            const Stmt& stmt = m_stmts[begin + i];
+            if (!stmt.m_writes.empty()) keys[i] = stmt.m_writes.front()->prettyName();
+            roots.push_back(i);
+        }
+        std::stable_sort(roots.begin(), roots.end(),
+                         [&](uint32_t a, uint32_t b) { return keys[a] < keys[b]; });
+        for (const uint32_t root : roots) {
             if (hasDataSucc[root] || visited[root]) continue;
             visited[root] = true;
             stack.emplace_back(root, 0);
