@@ -4,8 +4,10 @@ Where things stand and what comes next. Overwrite this file at the end of every 
 
 - Phase: P1 done (option + subset checker), P2 working (activity-driven nba evaluation), P5 started
   (extra designs with random inputs, rtlfast/extra/setup.sh).
-- HEAD src = 694f938 (run 5): 0651d80 plus DPI exports allowed (06d3124) plus no gating for nba
-  regions below 50000 AST nodes (694f938). Gate check PASS (results/20261019-694f938). Code
+- HEAD src = 1dd1376 (run 5): 0651d80 plus DPI exports allowed (06d3124), no gating for nba
+  regions below 50000 AST nodes (694f938), change detection at outside assignment sites instead
+  of shadow copies (1dd1376: ibex-full gated 1.15x, VeeR 1.17x). Gate check PASS
+  (results/20261019-1dd1376). Code
   generation for the gate designs unchanged since b880403; current perf on the run-5 host
   (results/20261019-6200f62): rocket 5.008x, smallboom 3.103x.
 - Last perf verdicts: b880403 (results/20261019-b880403): rocket 4.46x, smallboom 3.35x; end of run 4
@@ -60,12 +62,15 @@ Where things stand and what comes next. Overwrite this file at the end of every 
       at -Os, so this is specific to the gated code).
     - nba regions below MIN_NODES = 50000 AST nodes are not gated (694f938; env
       VERILATOR_RTLFAST_MIN_NODES, gating tests set it to 0).
+    - variables written outside the nba region by plain assignments (ico/act logic, still
+      AstAssignW at this stage) compare and mark their consumers at the assignment (1dd1376);
+      shadow copies only for top inputs, public/DPI-written variables and method calls.
     - DPI exports are allowed (06d3124): variables they write are outside writes (shadow compare);
       DPI imports, timing, fork, classes and $c are rejected.
     - dev knobs (not for users): VERILATOR_RTLFAST_BUNDLE_MEMBER / _BUNDLE, VERILATOR_RTLFAST_PARTITION_SIZE, VERILATOR_RTLFAST_PROFILE=<map>
       (run/change counters; dump with HARNESS=rtlfast/tools/prof_harness.cpp in tools/build.sh).
 - Tests: t_rtl_fast_unsup, t_rtl_fast_opt_bad, t_rtl_fast_gate, t_rtl_fast_bundle, t_rtl_fast_dpi_export,
-  t_rtl_fast_small and
+  t_rtl_fast_small, t_rtl_fast_outside and
   t_rtl_fast_packed (output vs stock golden; packed uses VERILATOR_RTLFAST_PARTITION_SIZE=1 and
   checks "outputs not compared 0"), t_rtl_fast_many_marks. test_regress vlt with --rtl-fast at d93d1d3 on ~3100 tests
   (lists: run-3 LEDGER): no wrong results; VCD-golden failures also fail on stock, VCDs identical.
@@ -120,11 +125,9 @@ Where things stand and what comes next. Overwrite this file at the end of every 
    on LargeBoom (all neutral or worse). Without hardware counters the bottleneck of the gated model
    cannot be pinned down; the evidence says per-run work (compares ~20%, marks ~14% of executed
    instructions on LargeBoom), not code size or fetch latency.
-2. Designs driven by a testbench (VeeR: 1318, ibex-full: 528 variables written by ico/act logic)
-   pay for shadow compares at every nba region start (VeeR 22% of time in _eval_body__nba). Option:
-   detect changes at the write sites in the ico/act functions (compare + marks, no shadow copy),
-   keeping shadows only for variables with non-simple writes; expected gain is modest (the copy and
-   one load per variable; branch-free shadow marks were not faster).
+2. Designs driven by a testbench: 1dd1376 moved change detection of ico/act logic to the write
+   sites (+15-17%). Next for them: profile VeeR/ibex again (top-input shadows, the ico region itself
+   runs every evaluation in stock and in rtl-fast alike).
 3. Structural options left for large designs: (a) sharing code between repeated instances (needs
    per-instance layout, parametrised constants, aligned partitioning; LargeBoom exact-duplicate
    potential only 12% of executed text), (b) a second, ungated code copy chosen at run time for very
