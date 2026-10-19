@@ -52,7 +52,10 @@
 // impure statements in their original order gives the same results. Among
 // those, a topological order is chosen that follows a depth first walk of
 // the data flow from the sinks, so statements feeding the same state are
-// adjacent and land in the same partition.
+// adjacent and land in the same partition. A partition is closed early when
+// the next statement is unrelated to it (it neither reads what the partition
+// writes nor shares most of its inputs), so unrelated logic that happens to be
+// adjacent in the order does not run together.
 //*************************************************************************
 
 #include "V3PchAstNoMT.h"  // VL_MT_DISABLED_CODE_UNIT
@@ -261,6 +264,8 @@ public:
 class RtlFastGate final {
     // Statements are merged into one gated partition up to this size (in AST nodes)
     static constexpr size_t PARTITION_SIZE = 200;
+    // A gated partition of at least this size only takes related statements
+    static constexpr size_t RELATED_MIN_SIZE = 50;
     // Size limit for groups of impure statements; these are mostly skipped as a
     // whole, but huge functions are slow to compile
     static constexpr size_t IMPURE_GROUP_SIZE = 4000;
@@ -622,20 +627,41 @@ class RtlFastGate final {
         return stmt.m_condp ? Kind::COND : Kind::ALWAYS;
     }
 
+    // Whether a gated statement is related to the partition being built: it
+    // reads a variable the partition writes, or shares most of its inputs, so
+    // it tends to be active together with the partition
+    static bool related(const Stmt& stmt, const std::set<const AstVarScope*>& partWrites,
+                        const std::set<const AstVarScope*>& partReads) {
+        size_t shared = 0;
+        for (const AstVarScope* const vscp : stmt.m_inReads) {
+            if (partWrites.count(vscp)) return true;
+            if (partReads.count(vscp)) ++shared;
+        }
+        return 2 * shared >= stmt.m_inReads.size();
+    }
+
     void partition() {
         Part* curp = nullptr;
+        std::set<const AstVarScope*> partWrites;  // Written by the current partition
+        std::set<const AstVarScope*> partReads;  // Read by the current partition
         for (size_t i = 0; i < m_stmts.size(); ++i) {
             const Stmt& stmt = m_stmts[i];
             const Kind kind = kindOf(stmt);
             if (!curp || curp->m_domain != stmt.m_domain || curp->m_scopep != stmt.m_scopep
                 || curp->m_kind != kind
-                || curp->m_size >= (kind == Kind::GATED ? m_partitionSize : IMPURE_GROUP_SIZE)) {
+                || curp->m_size >= (kind == Kind::GATED ? m_partitionSize : IMPURE_GROUP_SIZE)
+                || (kind == Kind::GATED && curp->m_size >= RELATED_MIN_SIZE
+                    && !related(stmt, partWrites, partReads))) {
                 m_parts.emplace_back();
                 curp = &m_parts.back();
                 curp->m_domain = stmt.m_domain;
                 curp->m_scopep = stmt.m_scopep;
                 curp->m_kind = kind;
+                partWrites.clear();
+                partReads.clear();
             }
+            partWrites.insert(stmt.m_writes.begin(), stmt.m_writes.end());
+            partReads.insert(stmt.m_inReads.begin(), stmt.m_inReads.end());
             curp->m_stmts.push_back(i);
             curp->m_size += stmt.m_size;
             curp->m_calls |= stmt.m_calls;
