@@ -128,8 +128,12 @@ Where things stand and what comes next. Overwrite this file at the end of every 
    cannot be pinned down; the evidence says per-run work (compares ~20%, marks ~14% of executed
    instructions on LargeBoom), not code size or fetch latency.
 2. Designs driven by a testbench: 1dd1376 moved change detection of ico/act logic to the write
-   sites (+15-17%). Next for them: profile VeeR/ibex again (top-input shadows, the ico region itself
-   runs every evaluation in stock and in rtl-fast alike).
+   sites (+15-17%); VeeR's _eval_body__nba went from 22% to 5.8% of the time. VeeR's hottest
+   partition now (16%, also ~30% of stock's time) holds three 256-iteration read-mux loops
+   (`for (j = 0; j < 256; j++) if (addr == j) out = f(j)`, not unrolled). A loop-to-index rewrite
+   under --rtl-fast (body runs once with j = addr when addr < N, then j = N) would remove most of it;
+   needs exact pattern checks (j only written by the loop, condition only on j and loop-invariant
+   values, body does not write them).
 3. Structural options left for large designs: (a) sharing code between repeated instances (needs
    per-instance layout, parametrised constants, aligned partitioning; LargeBoom exact-duplicate
    potential only 12% of executed text), (b) a second, ungated code copy chosen at run time for very
