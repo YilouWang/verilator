@@ -33,5 +33,7 @@ design.json (identical to smallboom apart from name and source):
 Evidence at fb45a89 (results/20261019-fb45a89/extra-*-largeboom*.json): lockstep check 50k cycles
 PASS, coverage 1.0; perf 100k cycles x3: stock 5.9k, --rtl-fast 6.9k c/s (1.163x, faster).
 Build: stock verilate 51 s + make 1762 s, --rtl-fast 57 s + 289 s (-j3, no ccache for either).
+Update at d93d1d3 (results/20261019-d93d1d3/extra-*-largeboom*.json): check 50k PASS, coverage 1.0;
+perf 1.350x (6.3k -> 8.5k c/s).
 Suggested gate entry: check 50000 cycles seed 1, perf 100000 cycles repeat 3 (a stock build alone
 takes ~30 min of the run budget).
