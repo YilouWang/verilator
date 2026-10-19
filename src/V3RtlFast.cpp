@@ -792,9 +792,8 @@ class RtlFastGate final {
             newp = assignp->rhsp()->cloneTree(false);
         } else {
             AstVarScope* const tempp = newLocalTemp("wr", lhsp->dtypep());
-            assignp->addHereThisAsNext(new AstAssign{flp,
-                                                     new AstVarRef{flp, tempp, VAccess::WRITE},
-                                                     assignp->rhsp()->unlinkFrBack()});
+            assignp->addHereThisAsNext(new AstAssign{
+                flp, new AstVarRef{flp, tempp, VAccess::WRITE}, assignp->rhsp()->unlinkFrBack()});
             assignp->rhsp(new AstVarRef{flp, tempp, VAccess::READ});
             newp = new AstVarRef{flp, tempp, VAccess::READ};
         }
@@ -808,7 +807,8 @@ class RtlFastGate final {
     AstNodeStmt* profCount(FileLine* flp, AstVarScope* arrayp, int index, AstNodeExpr* condp) {
         AstNodeExpr* incp = new AstConst{flp, AstConst::WidthedValue{}, 32, 1};
         if (condp) {
-            incp = new AstCond{flp, condp, incp, new AstConst{flp, AstConst::WidthedValue{}, 32, 0}};
+            incp = new AstCond{flp, condp, incp,
+                               new AstConst{flp, AstConst::WidthedValue{}, 32, 0}};
         }
         return new AstAssign{
             flp, new AstArraySel{flp, new AstVarRef{flp, arrayp, VAccess::WRITE}, index},
@@ -861,8 +861,9 @@ class RtlFastGate final {
                 continue;
             }
             AstVarScope* const changep = newLocalTemp("ch", m_netlistp->findBitDType());
-            prep = AstNode::addNext(prep, new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
-                                                        new AstConst{flp, AstConst::BitFalse{}}});
+            prep = AstNode::addNext(prep,
+                                    new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
+                                                  new AstConst{flp, AstConst::BitFalse{}}});
             const auto it = sites.find(vscp);
             if (it != sites.end()) {
                 for (AstNodeAssign* const assignp : it->second) {
@@ -870,8 +871,9 @@ class RtlFastGate final {
                 }
             } else {
                 AstVarScope* const oldp = newLocalTemp("old", vscp->dtypep());
-                prep = AstNode::addNext(prep, new AstAssign{flp, new AstVarRef{flp, oldp, VAccess::WRITE},
-                                                            new AstVarRef{flp, vscp, VAccess::READ}});
+                prep = AstNode::addNext(
+                    prep, new AstAssign{flp, new AstVarRef{flp, oldp, VAccess::WRITE},
+                                        new AstVarRef{flp, vscp, VAccess::READ}});
                 postp = AstNode::addNext(
                     postp, new AstAssign{flp, new AstVarRef{flp, changep, VAccess::WRITE},
                                          new AstNeq{flp, new AstVarRef{flp, vscp, VAccess::READ},
@@ -897,17 +899,18 @@ class RtlFastGate final {
             for (const auto& pair : profChanges) {
                 AstNodeExpr* const bitp = new AstVarRef{flp, pair.second, VAccess::READ};
                 anyp = anyp ? new AstOr{flp, anyp, bitp} : bitp;
-                postp = AstNode::addNext(postp, profCount(flp, m_profChgp, pair.first,
-                                                          new AstVarRef{flp, pair.second, VAccess::READ}));
+                postp = AstNode::addNext(
+                    postp, profCount(flp, m_profChgp, pair.first,
+                                     new AstVarRef{flp, pair.second, VAccess::READ}));
             }
             postp = AstNode::addNext(postp, profCount(flp, m_profRunsp, p, nullptr));
             if (anyp) postp = AstNode::addNext(postp, profCount(flp, m_profAnyp, p, anyp));
         }
         for (const auto& pair : flagChanges) {
             postp = AstNode::addNext(
-                postp, new AstAssign{flp, flagRef(flp, pair.first, VAccess::WRITE),
-                                     new AstOr{flp, flagRef(flp, pair.first, VAccess::READ),
-                                               pair.second}});
+                postp, new AstAssign{
+                           flp, flagRef(flp, pair.first, VAccess::WRITE),
+                           new AstOr{flp, flagRef(flp, pair.first, VAccess::READ), pair.second}});
         }
         if (prep) funcp->stmtsp()->addHereThisAsNext(prep);
         if (postp) funcp->addStmtsp(postp);
