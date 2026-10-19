@@ -958,6 +958,10 @@ class RtlFastGate final {
                                     + std::to_string(part.m_stmts.size()) + " "
                                     + std::to_string(part.m_ins.size()) + " "
                                     + std::to_string(part.m_outs.size()));
+                for (AstVarScope* const vscp : part.m_ins) {
+                    m_profMap.push_back("I " + std::to_string(&part - &m_parts[0]) + " "
+                                        + vscp->prettyName());
+                }
             }
             const int nParts = static_cast<int>(m_parts.size());
             m_profRunsp = profArray(flp, "__Vrtlfast_prof_runs", nParts);
