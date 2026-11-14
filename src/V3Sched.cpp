@@ -80,6 +80,37 @@ void addTriggerIndices(LogicByScope& lbs, const TriggerKit& trigKit, bool pre) {
     }
 }
 
+// Records the triggers a region is sensitive to, to build its trigger mask
+class TriggerMask final {
+    std::set<uint32_t> m_indices;  // Trigger indices recorded so far
+
+public:
+    // Record the triggers of logic that will be ordered. Call before ordering consumes it.
+    void add(const LogicByScope& lbs) {
+        for (const LogicByScope::Entry& entry : lbs) {
+            m_indices.insert(entry.m_triggers.begin(), entry.m_triggers.end());
+        }
+    }
+    // Wrap an external triggers provider to also record its triggers
+    V3Order::ExternalTriggersProvider record(const V3Order::ExternalTriggersProvider& provider) {
+        return [this, &provider](const AstVarScope* vscp, std::set<uint32_t>& triggers) {
+            std::set<uint32_t> provided;
+            provider(vscp, provided);
+            triggers.insert(provided.begin(), provided.end());
+            m_indices.insert(provided.begin(), provided.end());
+        };
+    }
+    AstVarScope* build(const TriggerKit& trigKit, const AstVarScope* trigVscp) const {
+        // Dynamic trigger conditions with side effects are evaluated on every pass of the eval
+        // loop, so every region must keep the loop going on any trigger
+        if (!v3Global.hasImpureTriggers()) return trigKit.newMask(trigVscp, m_indices);
+        const uint32_t nWords = VN_AS(trigVscp->dtypep(), UnpackArrayDType)->elementsConst();
+        std::set<uint32_t> all;
+        for (uint32_t i = 0; i < nWords * TriggerKit::WORD_SIZE; ++i) all.insert(i);
+        return trigKit.newMask(trigVscp, all);
+    }
+};
+
 // Add the VIF triggers that a given VarScope should be sensitive to.
 // Case 2 (non-virtual interface read): sensitive to that specific VarScope's trigger only
 // Case 3 (virtual interface read): sensitive to all member triggers of the same interface type
@@ -117,9 +148,11 @@ void createEvalRegion(
     uint32_t firstIterTrigger,
     const TriggerKit& trigKit,  // The trigger kit
     AstVarScope* trigp,  // The trigger vector - may be nullptr if no triggers or using 'condp'
+    AstVarScope* maskp,  // The triggers of 'trigp' that matter to this region, with 'trigp'
     AstNodeExpr* condp,  // Explicit condition that must be true to run 'phaseWorkp'
     AstNodeStmt* phasePrepp,  // Prep statements run before checking triggers
-    AstNodeStmt* phaseWorkp  // The work to do if anything triggered
+    AstNodeStmt* phaseWorkp,  // The work to do if anything triggered
+    AstNodeStmt* phaseFinishp = nullptr  // Statements run after the work, even if it did not run
 ) {
     UASSERT(!trigp || !condp, "Cannot use both 'trigp' and 'condp' in 'createEvalRegion'");
     UASSERT(!eval.firstIteration() || trigp,
@@ -169,25 +202,28 @@ void createEvalRegion(
         AstVarScope* const executeFlagp = topScopep->createTemp("__V" + tag + "Execute", 1);
         executeFlagp->varp()->noReset(true);
 
-        // If there is work in this region, execute it if any triggers fired
-        if (phaseWorkp) {
+        // If there is anything to do in this region, execute it if any triggers fired
+        const bool hasWork = phaseWorkp || phaseFinishp;
+        if (hasWork) {
             AstNodeExpr* const lhsp = new AstVarRef{flp, executeFlagp, VAccess::WRITE};
             // If using explicit condition, that directly determines whether to execute,
             // otherwise check if any triggers are fired
-            AstNodeExpr* const rhsp = condp ? condp : trigKit.newAnySetCall(trigp);
+            AstNodeExpr* const rhsp = condp ? condp : trigKit.newAnySetCall(trigp, maskp);
             funcp->addStmtsp(new AstAssign{flp, lhsp, rhsp});
+        }
 
-            // Add the work
+        // Add the work
+        if (phaseWorkp) {
             AstIf* const ifp = new AstIf{flp, new AstVarRef{flp, executeFlagp, VAccess::READ}};
             ifp->addThensp(phaseWorkp);
             funcp->addStmtsp(ifp);
         }
+        funcp->addStmtsp(phaseFinishp);
 
         // The function returns true iff it did run work
         AstNodeExpr* const retp
-            = phaseWorkp
-                  ? static_cast<AstNodeExpr*>(new AstVarRef{flp, executeFlagp, VAccess::READ})
-                  : static_cast<AstNodeExpr*>(new AstConst{flp, AstConst::BitFalse{}});
+            = hasWork ? static_cast<AstNodeExpr*>(new AstVarRef{flp, executeFlagp, VAccess::READ})
+                      : static_cast<AstNodeExpr*>(new AstConst{flp, AstConst::BitFalse{}});
         funcp->addStmtsp(new AstCReturn{flp, retp});
     }
 }
@@ -385,17 +421,22 @@ void createSettle(AstNetlist* netlistp, AstCFunc* const initFuncp, SenExprBuilde
     const uint32_t inputChanged = trigKit.extraTriggerIndex(firstIterationTrigger);
 
     // Create and the body function
-    AstCFunc* const stlFuncp = V3Order::order(
-        {&comb, &hybrid}, trigKit, trigKit.vscp(), cgRefBindings, "stl", false, true,
-        [=](const AstVarScope*, std::set<uint32_t>& triggers) { triggers.insert(inputChanged); });
+    TriggerMask stlMask;
+    stlMask.add(hybrid);
+    const V3Order::ExternalTriggersProvider stlExternal
+        = [=](const AstVarScope*, std::set<uint32_t>& triggers) { triggers.insert(inputChanged); };
+    AstCFunc* const stlFuncp = V3Order::order({&comb, &hybrid}, trigKit, trigKit.vscp(),
+                                              cgRefBindings, "stl", false, true,
+                                              stlMask.record(stlExternal));
     util::splitCheck(stlFuncp);
 
     // Create the region evaluation function
     createEvalRegion(  //
         netlistp, VEval::STL, firstIterationTrigger, trigKit,
         // Use trigger
-        trigKit.vscp(), nullptr,
+        trigKit.vscp(), stlMask.build(trigKit, trigKit.vscp()),
         // Explicit condition
+        nullptr,
         // Prep statements: Compute the current 'stl' triggers
         [&trigKit] {
             AstNodeStmt* const stmtp = trigKit.newCompBaseCall();
@@ -501,9 +542,10 @@ void createIcoRegion(AstNetlist* netlistp, AstCFunc* const initFuncp,
         = virtIfaceTriggers.makeVscpToTrigMap(trigKit, firstVifTriggerIndex);
 
     // Create and Order the body function
-    AstCFunc* const icoFuncp = V3Order::order(
-        {&logic}, trigKit, trigKit.vscp(), cgRefBindings, "ico", false, false,
-        [&](const AstVarScope* vscp, std::set<uint32_t>& triggers) {
+    TriggerMask icoMask;
+    icoMask.add(logic);
+    const V3Order::ExternalTriggersProvider icoExternal
+        = [&](const AstVarScope* vscp, std::set<uint32_t>& triggers) {
             AstVar* const varp = vscp->varp();
             // If it has an explicit change detect trigger, use that,
             // otherwise fall back to using the 'first iteration' trigger
@@ -519,14 +561,19 @@ void createIcoRegion(AstNetlist* netlistp, AstCFunc* const initFuncp,
             if (vscp->varp()->sensIfacep() || vscp->varp()->isVirtIface()) {
                 addTriggeredIface(vscp, vifVscpToTrigIco, virtIfaceTriggers, triggers);
             }
-        });
+        };
+    AstCFunc* const icoFuncp
+        = V3Order::order({&logic}, trigKit, trigKit.vscp(), cgRefBindings, "ico", false, false,
+                         icoMask.record(icoExternal));
     util::splitCheck(icoFuncp);
 
     // Create the region evaluation function
     createEvalRegion(  //
         netlistp, VEval::ICO, firstIterationTrigger, trigKit,
         // Use trigger
-        trigKit.vscp(), nullptr,
+        trigKit.vscp(), icoMask.build(trigKit, trigKit.vscp()),
+        // Explicit condition
+        nullptr,
         // Prep statements: Compute the current 'ico' triggers
         [&trigKit] {
             AstNodeStmt* const stmtp = trigKit.newCompBaseCall();
@@ -548,6 +595,8 @@ void createIcoRegion(AstNetlist* netlistp, AstCFunc* const initFuncp,
 struct EvalKit final {
     // The AstVarScope representing the region's trigger vector
     AstVarScope* const m_vscp = nullptr;
+    // The AstVarScope of the constant mask of the triggers of m_vscp that matter to this region
+    AstVarScope* const m_maskp = nullptr;
     // The AstCFunc that evaluates the region's logic
     AstCFunc* const m_funcp = nullptr;
     // Is this kit used/required?
@@ -556,6 +605,54 @@ struct EvalKit final {
 
 //============================================================================
 // Create the evaluation function of each region of a time step
+
+// Create the 'act' region evaluation function
+void createActRegion(AstNetlist* netlistp, const TriggerKit& trigKit, const EvalKit& actKit,
+                     const EvalKit& nbaKit, TimingKit& timingKit) {
+    FileLine* const flp = netlistp->fileline();
+
+    // 'createResume' consumes the contents that 'createReady' needs, so do the right order
+    AstCCall* const timingReadyp = timingKit.createReady(trigKit.vscp());
+    AstCCall* const timingResumep = timingKit.createResume(trigKit.vscp());
+
+    createEvalRegion(  //
+        netlistp, VEval::ACT, 0, trigKit,
+        // Use trigger
+        actKit.m_vscp, actKit.m_maskp, nullptr,
+        // Prep statements
+        [&]() {
+            // Compute the current 'act' triggers - the NBA triggers are the latched value
+            AstNodeStmt* stmtsp = trigKit.newCompBaseCall();
+            AstNodeStmt* const dumpp
+                = stmtsp ? trigKit.newDumpCall(trigKit.vscp(), trigKit.name(), true) : nullptr;
+            // Mark as ready for triggered awaits
+            if (timingReadyp) stmtsp = AstNode::addNext(stmtsp, timingReadyp->makeStmt());
+            if (AstVarScope* const vscAccp = trigKit.vscAccp()) {
+                stmtsp = AstNode::addNext(stmtsp, trigKit.newOrIntoCall(actKit.m_vscp, vscAccp));
+                AstCMethodHard* const cCallp = new AstCMethodHard{
+                    flp, new AstVarRef{flp, vscAccp, VAccess::WRITE}, VCMethod::UNPACKED_FILL,
+                    new AstConst{flp, AstConst::Unsized64{}, 0}};
+                cCallp->dtypeSetVoid();
+                stmtsp = AstNode::addNext(stmtsp, cCallp->makeStmt());
+            }
+            stmtsp = AstNode::addNext(stmtsp, trigKit.newCompExtCall(nbaKit.m_vscp));
+            stmtsp = AstNode::addNext(stmtsp, dumpp);
+            // Latch the 'act' triggers under the 'nba' triggers
+            stmtsp = AstNode::addNext(stmtsp, trigKit.newOrIntoCall(nbaKit.m_vscp, actKit.m_vscp));
+            //
+            return stmtsp;
+        }(),
+        // Work statements
+        [&]() {
+            AstNodeStmt* workp = nullptr;
+            // Resume triggered timing schedulers
+            if (timingResumep) workp = AstNode::addNext(workp, timingResumep->makeStmt());
+            // Invoke the 'act' function
+            workp = AstNode::addNext(workp, util::callVoidFunc(actKit.m_funcp));
+            //
+            return workp;
+        }());
+}
 
 void createEval(AstNetlist* netlistp,  //
                 const TriggerKit& trigKit,  //
@@ -570,56 +667,13 @@ void createEval(AstNetlist* netlistp,  //
     // Grab the delay scheduler variable, if any
     AstVarScope* const delaySchedVscp = timingKit.getDelayScheduler(netlistp);
 
-    // 'createResume' consumes the contents that 'createReady' needs, so do the right order
-    AstCCall* const timingReadyp = timingKit.createReady(trigKit.vscp());
-    AstCCall* const timingResumep = timingKit.createResume(trigKit.vscp());
-
-    // Create the 'act' region
-    createEvalRegion(  //
-        netlistp, VEval::ACT, 0, trigKit,
-        // Use trigger
-        actKit.m_vscp, nullptr,
-        // Prep statements
-        [&]() {
-            // Compute the current 'act' triggers - the NBA triggers are the latched value
-            AstNodeStmt* stmtsp = trigKit.newCompBaseCall();
-            AstNodeStmt* const dumpp
-                = stmtsp ? trigKit.newDumpCall(trigKit.vscp(), trigKit.name(), true) : nullptr;
-            // Mark as ready for triggered awaits
-            if (timingReadyp) stmtsp = AstNode::addNext(stmtsp, timingReadyp->makeStmt());
-            if (AstVarScope* const vscAccp = trigKit.vscAccp()) {
-                stmtsp = AstNode::addNext(stmtsp, trigKit.newOrIntoCall(actKit.m_vscp, vscAccp));
-            }
-            stmtsp = AstNode::addNext(stmtsp, trigKit.newCompExtCall(nbaKit.m_vscp));
-            stmtsp = AstNode::addNext(stmtsp, dumpp);
-            // Latch the 'act' triggers under the 'nba' triggers
-            stmtsp = AstNode::addNext(stmtsp, trigKit.newOrIntoCall(nbaKit.m_vscp, actKit.m_vscp));
-            //
-            return stmtsp;
-        }(),
-        // Work statements
-        [&]() {
-            AstNodeStmt* workp = nullptr;
-            if (AstVarScope* const actAccp = trigKit.vscAccp()) {
-                AstCMethodHard* const cCallp = new AstCMethodHard{
-                    flp, new AstVarRef{flp, actAccp, VAccess::WRITE}, VCMethod::UNPACKED_FILL,
-                    new AstConst{flp, AstConst::Unsized64{}, 0}};
-                cCallp->dtypeSetVoid();
-                workp = AstNode::addNext(workp, cCallp->makeStmt());
-            }
-            // Resume triggered timing schedulers
-            if (timingResumep) workp = AstNode::addNext(workp, timingResumep->makeStmt());
-            // Invoke the 'act' function
-            workp = AstNode::addNext(workp, util::callVoidFunc(actKit.m_funcp));
-            //
-            return workp;
-        }());
+    createActRegion(netlistp, trigKit, actKit, nbaKit, timingKit);
 
     // Create the 'inact' region
     createEvalRegion(  //
         netlistp, VEval::INACT, 0, trigKit,
         // Use explicit condition
-        nullptr,
+        nullptr, nullptr,
         [&]() -> AstNodeExpr* {
             if (!delaySchedVscp) return nullptr;
             // Run if any zero delays are pending
@@ -662,65 +716,40 @@ void createEval(AstNetlist* netlistp,  //
     createEvalRegion(  //
         netlistp, VEval::NBA, 0, trigKit,
         // Use trigger
-        nbaKit.m_vscp, nullptr,
-        // Prep statements
-        nullptr,
-        // Work statements
-        [&]() {
-            AstNodeStmt* workp = nullptr;
-            // Latch the 'nba' trigger flags under the following region's trigger flags
-            if (!obsKit.empty()) {
-                workp = trigKit.newOrIntoCall(obsKit.m_vscp, nbaKit.m_vscp);
-            } else if (!reactKit.empty()) {
-                workp = trigKit.newOrIntoCall(reactKit.m_vscp, nbaKit.m_vscp);
-            }
-            // Invoke the 'nba' function
-            workp = AstNode::addNext(workp, util::callVoidFunc(nbaKit.m_funcp));
-            // Clear the 'nba' triggers
-            workp = AstNode::addNext(workp, trigKit.newClearCall(nbaKit.m_vscp));
-            //
-            return workp;
-        }());
+        nbaKit.m_vscp, nbaKit.m_maskp, nullptr,
+        // Prep statements: latch the 'nba' trigger flags under the following region's flags
+        !obsKit.empty()     ? trigKit.newOrIntoCall(obsKit.m_vscp, nbaKit.m_vscp)
+        : !reactKit.empty() ? trigKit.newOrIntoCall(reactKit.m_vscp, nbaKit.m_vscp)
+                            : nullptr,
+        // Work statements: invoke the 'nba' function
+        util::callVoidFunc(nbaKit.m_funcp),
+        // Clear the 'nba' triggers
+        trigKit.newClearCall(nbaKit.m_vscp));
 
     // Create the 'obs' region
     createEvalRegion(  //
         netlistp, VEval::OBS, 0, trigKit,
         // Use trigger
-        obsKit.m_vscp, nullptr,
-        // Prep statements
-        nullptr,
-        // Work statements
-        [&]() -> AstNodeStmt* {
-            if (obsKit.empty()) return nullptr;
-            AstNodeStmt* workp = nullptr;
-            // Latch the Observed trigger flags under the Reactive trigger flags
-            if (!reactKit.empty()) {
-                workp = trigKit.newOrIntoCall(reactKit.m_vscp, obsKit.m_vscp);
-            }
-            // Invoke the 'obs' function
-            workp = AstNode::addNext(workp, util::callVoidFunc(obsKit.m_funcp));
-            // Clear the 'obs' triggers
-            workp = AstNode::addNext(workp, trigKit.newClearCall(obsKit.m_vscp));
-            //
-            return workp;
-        }());
+        obsKit.m_vscp, obsKit.m_maskp, nullptr,
+        // Prep statements: latch the Observed trigger flags under the Reactive trigger flags
+        obsKit.empty() || reactKit.empty() ? nullptr
+                                           : trigKit.newOrIntoCall(reactKit.m_vscp, obsKit.m_vscp),
+        // Work statements: invoke the 'obs' function
+        obsKit.empty() ? nullptr : util::callVoidFunc(obsKit.m_funcp),
+        // Clear the 'obs' triggers
+        obsKit.empty() ? nullptr : trigKit.newClearCall(obsKit.m_vscp));
 
     // Create the 'react' region
     createEvalRegion(  //
         netlistp, VEval::REACT, 0, trigKit,
         // Use trigger
-        reactKit.m_vscp, nullptr,
+        reactKit.m_vscp, reactKit.m_maskp, nullptr,
         // Prep statements
         nullptr,
-        // Work statements
-        [&]() -> AstNodeStmt* {
-            if (reactKit.empty()) return nullptr;
-            // Invoke the 'react' function
-            AstNodeStmt* workp = util::callVoidFunc(reactKit.m_funcp);
-            // Clear the 'react' triggers
-            workp = AstNode::addNext(workp, trigKit.newClearCall(reactKit.m_vscp));
-            return workp;
-        }());
+        // Work statements: invoke the 'react' function
+        reactKit.empty() ? nullptr : util::callVoidFunc(reactKit.m_funcp),
+        // Clear the 'react' triggers
+        reactKit.empty() ? nullptr : trigKit.newClearCall(reactKit.m_vscp));
 }
 
 }  // namespace
@@ -895,13 +924,20 @@ void schedule(AstNetlist* netlistp) {
               }
           };
 
+    // The 'act' region must also run for the triggers of the timing schedulers
+    TriggerMask actMask;
+    for (const LogicByScope* const lbsp :
+         {&logicRegions.m_pre, &logicRegions.m_act, &logicReplicas.m_act, &timingKit.m_lbs}) {
+        actMask.add(*lbsp);
+    }
     AstCFunc* const actFuncp
         = V3Order::order({&logicRegions.m_pre, &logicRegions.m_act, &logicReplicas.m_act}, trigKit,
-                         trigKit.vscp(), cgRefBindings, "act", false, false, externalTriggers);
+                         trigKit.vscp(), cgRefBindings, "act", false, false,
+                         actMask.record(externalTriggers));
     util::splitCheck(actFuncp);
     if (v3Global.opt.stats()) V3Stats::statsStage("sched-create-act");
 
-    const EvalKit actKit{trigKit.vscp(), actFuncp};
+    const EvalKit actKit{trigKit.vscp(), actMask.build(trigKit, trigKit.vscp()), actFuncp};
 
     // Orders a region's logic and creates the region eval function
     const auto order = [&](const std::string& name,
@@ -909,13 +945,18 @@ void schedule(AstNetlist* netlistp) {
         UINFO(2, "Scheduling " << name << " #logic = " << logic.size());
         AstVarScope* const trigVscp = trigKit.newTrigVec(name);
         // Add the trigger indices of the input logic
-        for (LogicByScope* lbsp : logic) addTriggerIndices(*lbsp, trigKit, false);
+        TriggerMask mask;
+        for (LogicByScope* lbsp : logic) {
+            addTriggerIndices(*lbsp, trigKit, false);
+            mask.add(*lbsp);
+        }
 
         AstCFunc* const funcp
             = V3Order::order(logic, trigKit, trigVscp, cgRefBindings, name,
-                             name == "nba" && v3Global.opt.mtasks(), false, externalTriggers);
+                             name == "nba" && v3Global.opt.mtasks(), false,
+                             mask.record(externalTriggers));
 
-        return {trigVscp, funcp};
+        return {trigVscp, mask.build(trigKit, trigVscp), funcp};
     };
 
     // Step 12: Create the 'nba' region evaluation function

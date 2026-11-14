@@ -372,7 +372,10 @@ public:
 
     // Helpers for code generation - lazy construct relevant functions
     AstNodeStmt* newAndNotCall(AstVarScope* op, AstVarScope* ap, AstVarScope* bp) const;
-    AstNodeExpr* newAnySetCall(AstVarScope* vscp) const;
+    // Constant table, shaped like 'vscp', with the bits of the given trigger indices set
+    AstVarScope* newMask(const AstVarScope* vscp, const std::set<uint32_t>& indices) const;
+    // True if any trigger in 'vscp' that is also set in 'maskp' is set
+    AstNodeExpr* newAnySetCall(AstVarScope* vscp, AstVarScope* maskp) const;
     AstNodeStmt* newClearCall(AstVarScope* vscp) const;
     AstNodeStmt* newOrIntoCall(AstVarScope* op, AstVarScope* ip) const;
     // Helpers for code generation

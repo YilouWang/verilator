@@ -21,6 +21,7 @@
 #include "V3PchAstNoMT.h"  // VL_MT_DISABLED_CODE_UNIT
 
 #include "V3Const.h"
+#include "V3ConstPool.h"
 #include "V3EmitCBase.h"
 #include "V3EmitV.h"
 #include "V3Order.h"
@@ -153,8 +154,9 @@ AstCFunc* TriggerKit::createAnySetFunc(AstUnpackArrayDType* const dtypep) const 
     funcp->isStatic(true);
     funcp->rtnType("bool");
 
-    // Add argument
+    // Add arguments
     AstVarScope* const iVscp = newArgument(funcp, dtypep, "in", VDirection::CONSTREF);
+    AstVarScope* const mVscp = newArgument(funcp, dtypep, "mask", VDirection::CONSTREF);
 
     // Add loop counter variable
     AstVarScope* const nVscp = newLocal(funcp, u32DTypep, "n");
@@ -170,7 +172,8 @@ AstCFunc* TriggerKit::createAnySetFunc(AstUnpackArrayDType* const dtypep) const 
 
     // Loop body
     const uint32_t nWords = dtypep->elementsConst();
-    AstNodeExpr* const condp = new AstArraySel{flp, rd(iVscp), rd(nVscp)};
+    AstNodeExpr* const condp = new AstAnd{flp, new AstArraySel{flp, rd(iVscp), rd(nVscp)},
+                                          new AstArraySel{flp, rd(mVscp), rd(nVscp)}};
     AstNodeStmt* const thenp = new AstCReturn{flp, new AstConst{flp, AstConst::BitTrue{}}};
     AstNodeExpr* const limp = new AstConst{flp, AstConst::WidthedValue{}, 32, nWords};
     loopp->addStmtsp(new AstIf{flp, condp, thenp});
@@ -262,9 +265,27 @@ AstCFunc* TriggerKit::createOrIntoFunc(AstUnpackArrayDType* const oDtypep,
     return funcp;
 }
 
-AstNodeExpr* TriggerKit::newAnySetCall(AstVarScope* const vscp) const {
+AstVarScope* TriggerKit::newMask(const AstVarScope* vscp, const std::set<uint32_t>& indices) const {
+    if (!m_nVecWords) return nullptr;
+    FileLine* const flp = v3Global.rootp()->topScopep()->fileline();
+    std::map<uint32_t, uint64_t> wordMasks;
+    for (const uint32_t index : indices) wordMasks[VL_BITWORD_Q(index)] |= VL_BIT_Q(index);
+    AstConsArray* const consp = new AstConsArray{flp, vscp->dtypep(),
+                                                 new AstConst{flp, AstConst::Unsized64{}, 0}};
+    for (const auto& wordMask : wordMasks) {
+        consp->valuep(wordMask.first, new AstConst{flp, AstConst::Unsized64{}, wordMask.second});
+    }
+    AstVarRef* const refp = V3ConstPool::find(consp);
+    AstVarScope* const maskp = refp->varScopep();
+    VL_DO_DANGLING(refp->deleteTree(), refp);
+    VL_DO_DANGLING(consp->deleteTree(), consp);
+    return maskp;
+}
+
+AstNodeExpr* TriggerKit::newAnySetCall(AstVarScope* const vscp, AstVarScope* const maskp) const {
     FileLine* const flp = v3Global.rootp()->topScopep()->fileline();
     if (!m_nVecWords) return new AstConst{flp, AstConst::BitFalse{}};
+    UASSERT_OBJ(maskp, vscp, "Missing trigger mask");
 
     AstCFunc* funcp = nullptr;
     if (vscp->dtypep() == m_trigVecDTypep) {
@@ -278,6 +299,7 @@ AstNodeExpr* TriggerKit::newAnySetCall(AstVarScope* const vscp) const {
     }
     AstCCall* const callp = new AstCCall{flp, funcp};
     callp->addArgsp(new AstVarRef{flp, vscp, VAccess::WRITE});
+    callp->addArgsp(new AstVarRef{flp, maskp, VAccess::READ});
     callp->dtypeSetBit();
     return callp;
 }
@@ -646,7 +668,10 @@ TriggerKit TriggerKit::create(AstNetlist* netlistp,  //
 
     // Add a print to the dumping function if there are no triggers pending
     {
-        AstIf* const ifp = new AstIf{flp, new AstLogNot{flp, kit.newAnySetCall(dumpTrgp)}};
+        std::set<uint32_t> allTriggers;
+        for (uint32_t i = 0; i < kit.m_nVecWords * WORD_SIZE; ++i) allTriggers.insert(i);
+        AstVarScope* const allp = kit.newMask(dumpTrgp, allTriggers);
+        AstIf* const ifp = new AstIf{flp, new AstLogNot{flp, kit.newAnySetCall(dumpTrgp, allp)}};
         kit.m_dumpp->addStmtsp(ifp);
         AstCStmt* const cstmtp = new AstCStmt{flp};
         ifp->addThensp(cstmtp);
