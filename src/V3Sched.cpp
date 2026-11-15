@@ -425,9 +425,9 @@ void createSettle(AstNetlist* netlistp, AstCFunc* const initFuncp, SenExprBuilde
     stlMask.add(hybrid);
     const V3Order::ExternalTriggersProvider stlExternal
         = [=](const AstVarScope*, std::set<uint32_t>& triggers) { triggers.insert(inputChanged); };
-    AstCFunc* const stlFuncp = V3Order::order({&comb, &hybrid}, trigKit, trigKit.vscp(),
-                                              cgRefBindings, "stl", false, true,
-                                              stlMask.record(stlExternal));
+    AstCFunc* const stlFuncp
+        = V3Order::order({&comb, &hybrid}, trigKit, trigKit.vscp(), cgRefBindings, "stl", false,
+                         true, stlMask.record(stlExternal));
     util::splitCheck(stlFuncp);
 
     // Create the region evaluation function
@@ -546,25 +546,24 @@ void createIcoRegion(AstNetlist* netlistp, AstCFunc* const initFuncp,
     icoMask.add(logic);
     const V3Order::ExternalTriggersProvider icoExternal
         = [&](const AstVarScope* vscp, std::set<uint32_t>& triggers) {
-            AstVar* const varp = vscp->varp();
-            // If it has an explicit change detect trigger, use that,
-            // otherwise fall back to using the 'first iteration' trigger
-            auto it = inp2changedp.find(vscp);
-            if (it != inp2changedp.end()) {
-                triggers.insert(trigKit.senItem2TrigIdx(it->second->sensesp()));
-            } else if (varp->isPrimaryInish() || varp->isSigUserRWPublic() || varp->sampled()) {
-                triggers.insert(firstIterTrigger);
-            }
-            // Add other triggers
-            if (varp->isWrittenByDpi())
-                triggers.insert(trigKit.extraTriggerIndex(dpiExportTriggerIndex));
-            if (vscp->varp()->sensIfacep() || vscp->varp()->isVirtIface()) {
-                addTriggeredIface(vscp, vifVscpToTrigIco, virtIfaceTriggers, triggers);
-            }
-        };
-    AstCFunc* const icoFuncp
-        = V3Order::order({&logic}, trigKit, trigKit.vscp(), cgRefBindings, "ico", false, false,
-                         icoMask.record(icoExternal));
+              AstVar* const varp = vscp->varp();
+              // If it has an explicit change detect trigger, use that,
+              // otherwise fall back to using the 'first iteration' trigger
+              auto it = inp2changedp.find(vscp);
+              if (it != inp2changedp.end()) {
+                  triggers.insert(trigKit.senItem2TrigIdx(it->second->sensesp()));
+              } else if (varp->isPrimaryInish() || varp->isSigUserRWPublic() || varp->sampled()) {
+                  triggers.insert(firstIterTrigger);
+              }
+              // Add other triggers
+              if (varp->isWrittenByDpi())
+                  triggers.insert(trigKit.extraTriggerIndex(dpiExportTriggerIndex));
+              if (vscp->varp()->sensIfacep() || vscp->varp()->isVirtIface()) {
+                  addTriggeredIface(vscp, vifVscpToTrigIco, virtIfaceTriggers, triggers);
+              }
+          };
+    AstCFunc* const icoFuncp = V3Order::order({&logic}, trigKit, trigKit.vscp(), cgRefBindings,
+                                              "ico", false, false, icoMask.record(icoExternal));
     util::splitCheck(icoFuncp);
 
     // Create the region evaluation function
@@ -930,10 +929,9 @@ void schedule(AstNetlist* netlistp) {
          {&logicRegions.m_pre, &logicRegions.m_act, &logicReplicas.m_act, &timingKit.m_lbs}) {
         actMask.add(*lbsp);
     }
-    AstCFunc* const actFuncp
-        = V3Order::order({&logicRegions.m_pre, &logicRegions.m_act, &logicReplicas.m_act}, trigKit,
-                         trigKit.vscp(), cgRefBindings, "act", false, false,
-                         actMask.record(externalTriggers));
+    AstCFunc* const actFuncp = V3Order::order(
+        {&logicRegions.m_pre, &logicRegions.m_act, &logicReplicas.m_act}, trigKit, trigKit.vscp(),
+        cgRefBindings, "act", false, false, actMask.record(externalTriggers));
     util::splitCheck(actFuncp);
     if (v3Global.opt.stats()) V3Stats::statsStage("sched-create-act");
 
@@ -951,10 +949,9 @@ void schedule(AstNetlist* netlistp) {
             mask.add(*lbsp);
         }
 
-        AstCFunc* const funcp
-            = V3Order::order(logic, trigKit, trigVscp, cgRefBindings, name,
-                             name == "nba" && v3Global.opt.mtasks(), false,
-                             mask.record(externalTriggers));
+        AstCFunc* const funcp = V3Order::order(logic, trigKit, trigVscp, cgRefBindings, name,
+                                               name == "nba" && v3Global.opt.mtasks(), false,
+                                               mask.record(externalTriggers));
 
         return {trigVscp, mask.build(trigKit, trigVscp), funcp};
     };

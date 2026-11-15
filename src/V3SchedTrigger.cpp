@@ -265,13 +265,14 @@ AstCFunc* TriggerKit::createOrIntoFunc(AstUnpackArrayDType* const oDtypep,
     return funcp;
 }
 
-AstVarScope* TriggerKit::newMask(const AstVarScope* vscp, const std::set<uint32_t>& indices) const {
+AstVarScope* TriggerKit::newMask(const AstVarScope* vscp,
+                                 const std::set<uint32_t>& indices) const {
     if (!m_nVecWords) return nullptr;
     FileLine* const flp = v3Global.rootp()->topScopep()->fileline();
     std::map<uint32_t, uint64_t> wordMasks;
     for (const uint32_t index : indices) wordMasks[VL_BITWORD_Q(index)] |= VL_BIT_Q(index);
-    AstConsArray* const consp = new AstConsArray{flp, vscp->dtypep(),
-                                                 new AstConst{flp, AstConst::Unsized64{}, 0}};
+    AstConsArray* const consp
+        = new AstConsArray{flp, vscp->dtypep(), new AstConst{flp, AstConst::Unsized64{}, 0}};
     for (const auto& wordMask : wordMasks) {
         consp->valuep(wordMask.first, new AstConst{flp, AstConst::Unsized64{}, wordMask.second});
     }
